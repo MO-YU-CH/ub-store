@@ -46,20 +46,30 @@
 pip install Pillow "kbinxml==1.7" "lxml==4.9.4"
 ```
 
-### ffmpeg 怎么放
+### ffmpeg
 
-安装谱面时要用 ffmpeg 把音源（ogg/mp3/…) 解码成 PCM。程序按以下顺序查找，
-**任选一种方式即可**——最省事的是**把 `ffmpeg.exe` 和主程序放在同一个目录**：
+安装谱面时要用 ffmpeg 把音源（ogg/mp3/…）解码成 PCM。
 
-1. 环境变量 `UB_FFMPEG` 指向完整路径
-2. **主程序同目录**（以及其下 `ffmpeg/`、`bin/`、`ffmpeg/bin/` 子目录）
-3. PyInstaller 解包目录
+**打包好的 exe 已经内置了 ffmpeg**（4.4.1，解包到临时目录直接用），
+所以最终用户**什么都不用装**。
+
+自行从源码构建时，把 ffmpeg 放到 `tools/assets/ffmpeg.exe`（spec 会打进包）。
+程序按以下顺序查找：
+
+1. 环境变量 `UB_FFMPEG` 指定的完整路径
+2. **内置的**（`_MEIPASS/assets/ffmpeg.exe`，即打包时带进去的那份）
+3. 主程序同目录（及其 `assets/`、`bin/`、`ffmpeg/` 子目录）
 4. `D:\ffmpeg\bin\` / `C:\ffmpeg\bin\`
 5. 系统 PATH
 
-> 之所以不把 ffmpeg 打进 exe：它编码压缩后仍占 **40 MB 以上**，
-> 会让 exe 从 23 MB 涨到 67 MB，**每次自更新都要重下整个包**。
-> 放在同目录则 exe 保持 23 MB，ffmpeg 只需下载一次、之后更新都不用动。
+> ⚠️ **必须用支持 Windows 7 的版本**：实测 2025 年的新版 ffmpeg 在 Win7 上
+> 直接 `0xC0000005` 崩溃（用了新 API）。本项目用 **ffmpeg 4.4.1-essentials**
+> （gyan.dev 构建），实测解码正常，且只有 73.8 MB（新版 140 MB）。
+>
+> ```
+> # 获取（任一）
+> ffmpeg-4.4.1-essentials_build.zip  →  bin/ffmpeg.exe  →  tools/assets/ffmpeg.exe
+> ```
 
 用 `ub_store.exe --depcheck` 可以看到当前实际用的是哪个 ffmpeg。
 

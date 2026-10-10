@@ -28,6 +28,8 @@ _MEI*/
 # 但 release/ 下是我们自己的构建产物，作为自更新下载源，需要入库
 !release/*.exe
 !VERSION
+# tools/assets/ffmpeg.exe（73.8 MB）也刻意不入库——二进制走 Release 分发，
+# 免得 clone 仓库要拖 74 MB。自行构建时按 README「ffmpeg 怎么放」准备。
 *.ifs
 *.bin
 *.pac
