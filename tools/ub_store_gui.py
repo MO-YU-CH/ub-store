@@ -415,7 +415,8 @@ class StoreGUI:
     # ---- 拖放（原生 WM_DROPFILES，不依赖 tkinterdnd2）----
     def _enable_drop(self):
         """把文件拖到窗口上即可导入。任何环节失败都静默跳过，不影响主功能。"""
-        if os.name != "nt" or "--selftest" in sys.argv or "--fontcheck" in sys.argv:
+        if os.name != "nt" or any(a in sys.argv for a in
+                                  ("--selftest", "--fontcheck", "--depcheck")):
             return
         try:
             import ctypes
@@ -1741,6 +1742,41 @@ def main(argv=None):
         if FONT is not None:
             ok = FONT.restore_session_ui_font()
             print("restore session ui font: %s" % ("OK" if ok else "失败"))
+        root.destroy()
+        return 0
+    if "--depcheck" in argv:
+        # 依赖自检：确认打包进 exe 的关键第三方库都在（缺了会导致安装谱面失败）
+        print("=== 关键依赖 ===")
+        rows = []
+        try:
+            import kbinxml
+            rows.append(("kbinxml", getattr(kbinxml, "__version__", "?")))
+        except Exception as ex:                              # noqa: BLE001
+            rows.append(("kbinxml", "**缺失**: %s" % ex))
+        try:
+            import lxml.etree as _le
+            rows.append(("lxml", getattr(_le, "__version__", "?")))
+        except Exception as ex:                              # noqa: BLE001
+            rows.append(("lxml", "**缺失**: %s" % ex))
+        try:
+            import PIL
+            rows.append(("Pillow", getattr(PIL, "__version__", "?")))
+        except Exception as ex:                              # noqa: BLE001
+            rows.append(("Pillow", "**缺失**: %s" % ex))
+        for name, ver in rows:
+            print("  %-12s %s" % (name, ver))
+        print("=== 内部模块 ===")
+        for mod, label in ((S, "ub_store"), (I, "ub_import"),
+                           (UU, "ub_updater"), (U, "ub_update"),
+                           (FONT, "ub_font")):
+            print("  %-12s %s" % (label, "OK" if mod is not None else "**缺失**"))
+        # ub_chart 的 KBinXML 是否真的可用（这是安装谱面的必需项）
+        try:
+            import ub_chart as _uc
+            print("  %-12s %s" % ("KBinXML",
+                                  "OK" if getattr(_uc, "KBinXML", None) else "**不可用**"))
+        except Exception as ex:                              # noqa: BLE001
+            print("  %-12s **导入失败**: %s" % ("ub_chart", ex))
         root.destroy()
         return 0
     if "--fontcheck" in argv:
