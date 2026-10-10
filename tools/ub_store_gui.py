@@ -47,6 +47,12 @@ try:
 except Exception:                                        # noqa: BLE001
     FONT = None
 
+#: 界面统一字体族名。
+#: 直接把族名写进每个控件，而不是依赖 ``font=("", N)`` 的"系统默认字体"——
+#: 日文系统上"系统默认"是 MS UI Gothic，不含简体字形；而且空族名不一定跟着
+#: TkDefaultFont 走，写死最可靠。注册失败时这个族名不存在，tkinter 会自动回退。
+UI_FONT = FONT.FONT_FAMILY if FONT is not None else ""
+
 APP_TITLE = "jubeat 自制谱商店 — Malody 谱库 → 下载 → 装进 jubeat"
 DISCLAIMER = (
     "【免责声明】\n\n"
@@ -172,7 +178,7 @@ class CardGrid(ttk.Frame):
 
         self.empty_var = tk.StringVar(value="")
         self.empty_label = tk.Label(self.inner, textvariable=self.empty_var,
-                                    bg=C["bg"], fg=C["fg_dim"], font=("", 11))
+                                    bg=C["bg"], fg=C["fg_dim"], font=(UI_FONT, 11))
 
     # ---- 滚动 ----
     def _sync_scroll(self, _e=None):
@@ -230,7 +236,7 @@ class CardGrid(ttk.Frame):
             w.destroy()
         # 空状态标签会随上面的销毁一并消失，这里重建
         self.empty_label = tk.Label(self.inner, textvariable=self.empty_var,
-                                    bg=C["bg"], fg=C["fg_dim"], font=("", 11))
+                                    bg=C["bg"], fg=C["fg_dim"], font=(UI_FONT, 11))
         self.cards = []
         self._selected = -1
         self._cols = 0
@@ -269,9 +275,9 @@ class CardGrid(ttk.Frame):
         holder.pack(pady=(10, 4))
         holder.pack_propagate(False)
         cover = tk.Label(holder, bg=C["bg3"], fg=C["fg_dim"], text="载入中…",
-                         font=("", 9))
+                         font=(UI_FONT, 9))
         cover.place(x=0, y=0, relwidth=1, relheight=1)
-        badge = tk.Label(holder, bg=C["accent"], fg="#ffffff", font=("", 8, "bold"),
+        badge = tk.Label(holder, bg=C["accent"], fg="#ffffff", font=(UI_FONT, 8, "bold"),
                          padx=5, pady=1)
         bt = badge_of(item) if badge_of else None
         if bt:
@@ -279,11 +285,11 @@ class CardGrid(ttk.Frame):
             badge.place(relx=1.0, x=-4, y=4, anchor="ne")
 
         title = tk.Label(f, text=_short_text(item.get("title") or "(无标题)", 18),
-                         bg=C["bg2"], fg=C["fg"], font=("", 10, "bold"),
+                         bg=C["bg2"], fg=C["fg"], font=(UI_FONT, 10, "bold"),
                          wraplength=self.card_w - 18, justify="left", anchor="w")
         title.pack(fill="x", padx=9, pady=(4, 0))
         artist = tk.Label(f, text=_short_text(item.get("artist") or "-", 22),
-                          bg=C["bg2"], fg=C["fg_dim"], font=("", 8),
+                          bg=C["bg2"], fg=C["fg_dim"], font=(UI_FONT, 8),
                           wraplength=self.card_w - 18, justify="left", anchor="w")
         artist.pack(fill="x", padx=9)
 
@@ -519,7 +525,7 @@ class StoreGUI:
         st.configure("TLabel", background=C["bg"], foreground=C["fg"])
         st.configure("Dim.TLabel", background=C["bg"], foreground=C["fg_dim"])
         st.configure("Head.TLabel", background=C["bg"], foreground=C["accent"],
-                     font=("", 12, "bold"))
+                     font=(UI_FONT, 12, "bold"))
         st.configure("TButton", background=C["bg3"], foreground=C["fg"],
                      borderwidth=0, padding=(10, 6))
         st.map("TButton", background=[("active", C["accent"])],
@@ -653,7 +659,7 @@ class StoreGUI:
         side.pack(side="right", fill="y", padx=(8, 0))
         side.pack_propagate(False)
         tk.Label(side, text="谱面详情", bg=C["bg2"], fg=C["accent"],
-                 font=("", 12, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+                 font=(UI_FONT, 12, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
         self.detail = tk.Text(side, height=14, width=30, bg=C["bg3"], fg=C["fg"],
                               relief="flat", wrap="word")
         self.detail.pack(padx=10, pady=6, fill="both", expand=True)
@@ -722,7 +728,7 @@ class StoreGUI:
         card = ttk.Frame(root, style="Card.TFrame")
         card.pack(fill="x", padx=16, pady=16)
         tk.Label(card, text="Malody 账号登录", bg=C["bg2"], fg=C["accent"],
-                 font=("", 12, "bold")).grid(row=0, column=0, columnspan=2,
+                 font=(UI_FONT, 12, "bold")).grid(row=0, column=0, columnspan=2,
                                              sticky="w", padx=12, pady=(12, 4))
         tk.Label(card, text="账号 / 邮箱", bg=C["bg2"], fg=C["fg"]).grid(
             row=1, column=0, sticky="e", padx=8, pady=6)
@@ -1069,14 +1075,14 @@ class StoreGUI:
         mid = item.get("installed_music_id")
         if err:
             tk.Label(parent, text="⚠ " + _short_text(err, 60), bg=C["bg2"],
-                     fg=C["danger"], font=("", 8), wraplength=CARD_W - 24,
+                     fg=C["danger"], font=(UI_FONT, 8), wraplength=CARD_W - 24,
                      justify="left", anchor="w").pack(fill="x")
             return
         if mid:
             row = tk.Frame(parent, bg=C["bg2"])
             row.pack(fill="x")
             tk.Label(row, text="已装 id=%s" % mid, bg=C["bg2"], fg=C["accent2"],
-                     font=("", 8)).pack(side="left")
+                     font=(UI_FONT, 8)).pack(side="left")
             ttk.Button(row, text="卸载", style="Danger.TButton",
                        command=lambda m=mid: self.uninstall_card(m)).pack(side="right")
         else:
