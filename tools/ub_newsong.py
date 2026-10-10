@@ -196,6 +196,98 @@ def _tex_ids(root: str):
     return out
 
 
+def find_orphan_files(game: str) -> list:
+    """反向扫描：**文件还在、但曲表里已经没有对应条目**的自制谱残留文件。
+
+    与 `find_orphans()`（条目在、文件没了）正好相反，两者都会导致"卸载不干净"。
+    典型成因：卸载时游戏正在运行、文件被占用，`os.remove` 失败但没被注意到；
+    或者早期版本卸载时漏删。
+
+    只扫**自制谱 id 区**（段==90 且 偏移>=OFFICIAL_SEQ_LIMIT），不动官方文件。
+    返回 [{"music_id":…, "files":[…], "size":…}, …]
+    """
+    p = game_paths(game)
+    txt = open(music_table_path(game), encoding="utf-8", errors="replace").read()
+    in_table = set()
+    for b in music_blocks(txt):
+        m = MID_RE.search(b)
+        if m:
+            in_table.add(int(m.group(1)))
+
+    def custom_id(mid):
+        return (mid // 1000000) == CUSTOM_SEGMENT and (mid % 1000000) >= OFFICIAL_SEQ_LIMIT
+
+    found = {}
+
+    def add(mid, path):
+        try:
+            sz = os.path.getsize(path)
+        except OSError:
+            sz = 0
+        rec = found.setdefault(mid, {"music_id": mid, "files": [], "size": 0})
+        rec["files"].append(path)
+        rec["size"] += sz
+
+    # 自制谱的 _msc.ifs（只扫 d900xxxx 这类自制分组目录，避免全盘遍历）
+    root = p["ifs_overlay"]
+    if os.path.isdir(root):
+        for d in os.listdir(root):
+            dp = os.path.join(root, d)
+            if not os.path.isdir(dp):
+                continue
+            for fn in os.listdir(dp):
+                m = re.fullmatch(r"(\d+)_msc\.ifs", fn)
+                if not m:
+                    continue
+                mid = int(m.group(1))
+                if custom_id(mid) and mid not in in_table:
+                    add(mid, os.path.join(dp, fn))
+    # tex / mdl
+    mo = p["model_overlay"]
+    if os.path.isdir(mo):
+        for fn in os.listdir(mo):
+            m = re.fullmatch(r"(?:tex|mdl)_l44_bnr_big_id(\d+)\.bin", fn)
+            if not m:
+                continue
+            mid = int(m.group(1))
+            if custom_id(mid) and mid not in in_table:
+                add(mid, os.path.join(mo, fn))
+    return sorted(found.values(), key=lambda x: x["music_id"])
+
+
+def cleanup_orphan_files(game: str, music_ids=None, dry_run=False) -> dict:
+    """删除孤儿残留文件（先复核"曲表里确实没有该条目"再删）。"""
+    items = find_orphan_files(game)
+    if music_ids is not None:
+        want = set(int(x) for x in music_ids)
+        items = [x for x in items if x["music_id"] in want]
+    removed, failed = [], []
+    freed = 0
+    for rec in items:
+        for path in rec["files"]:
+            if dry_run:
+                removed.append(path)
+                freed += os.path.getsize(path) if os.path.exists(path) else 0
+                continue
+            try:
+                sz = os.path.getsize(path)
+                os.remove(path)
+                removed.append(path)
+                freed += sz
+            except OSError as ex:
+                failed.append({"path": path, "error": str(ex)})
+        # 清掉变空的分组目录
+        if rec["files"]:
+            d = os.path.dirname(rec["files"][0])
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+            except OSError:
+                pass
+    return {"removed": removed, "failed": failed, "freed": freed,
+            "dry_run": bool(dry_run)}
+
+
 def scan_occupied(game: str) -> dict:
     p = game_paths(game)
     src = {
@@ -1392,23 +1484,47 @@ def uninstall(game, music_id, workdir=None, stamp=None):
     state = json.load(open(state_path, encoding="utf-8"))
 
     removed = []
+    failed = []
     for f in state["new_files"]:
         p = f["path"]
-        if os.path.exists(p):
+        if not os.path.exists(p):
+            continue
+        try:
             os.remove(p)
             removed.append(p)
+        except OSError as ex:
+            # 常见于游戏正在运行 —— 文件被占用，删不掉
+            failed.append({"path": p, "error": str(ex)})
     # 清理空的分组目录（仅当为空）
-    d = os.path.dirname(new_ifs_path(game, music_id))
-    if os.path.isdir(d) and not os.listdir(d):
-        os.rmdir(d)
+    for base in (new_ifs_path(game, music_id),):
+        d = os.path.dirname(base)
+        try:
+            if os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+        except OSError:
+            pass
 
     restored = []
+    restore_failed = []
     for path, bak in state["backups"].items():
-        if os.path.exists(bak):
+        if not os.path.exists(bak):
+            restore_failed.append({"path": path, "error": "备份不存在：%s" % bak})
+            continue
+        try:
             shutil.copy2(bak, path)
             restored.append(path)
+        except OSError as ex:
+            restore_failed.append({"path": path, "error": str(ex)})
 
-    os.remove(state_path)
+    # ★ 自检：删完再确认一遍，把"本该删掉却还在"的列出来
+    leftover = [f["path"] for f in state["new_files"] if os.path.exists(f["path"])]
+
+    # 只有真删干净了才移除 state —— 否则保留，方便用户重试
+    state_removed = None
+    if not leftover and not restore_failed:
+        os.remove(state_path)
+        state_removed = state_path
+
     # 顺带撤销分组图集里追加的小贴图（若有侧车记录；失败不影响主流程）
     gtx = {}
     try:
@@ -1416,7 +1532,9 @@ def uninstall(game, music_id, workdir=None, stamp=None):
     except Exception as ex:                                   # pragma: no cover
         gtx = {"error": str(ex)}
     return {"music_id": music_id, "removed": removed, "restored": restored,
-            "state_removed": state_path, "group_tex": gtx}
+            "state_removed": state_removed, "group_tex": gtx,
+            "failed": failed, "restore_failed": restore_failed,
+            "leftover": leftover, "clean": not leftover and not restore_failed}
 
 
 # ============================================================================

@@ -9,6 +9,7 @@
   · 超过 3 档     -> 取最难的 3 个
   · 定数（level） -> 固定 1
 """
+import json
 import os
 import sys
 import unittest
@@ -315,6 +316,121 @@ class TestSlotMapOffset(unittest.TestCase):
         self.assertIn("apply_bgm_offset=True", src,
                       "build_new_ifs 必须传 apply_bgm_offset=True，"
                       "否则 Malody 的音源偏移被忽略、音符会比音乐晚")
+
+
+class TestUninstallCleanliness(unittest.TestCase):
+    """卸载要删干净；没删干净时 state 要留着方便重试，并报出 leftover。"""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="ub_uninst_")
+        self.game = os.path.join(self.tmp, "contents")
+        for sub in ("data_mods/omnimix/ifs_pack/d9000999",
+                    "data_mods/omnimix/d3/model",
+                    "data_mods/omnimix/music_info",
+                    "data"):
+            os.makedirs(os.path.join(self.game, sub), exist_ok=True)
+        self.ifs = os.path.join(self.game, "data_mods/omnimix/ifs_pack/d9000999/90009999_msc.ifs")
+        self.tex = os.path.join(self.game, "data_mods/omnimix/d3/model/tex_l44_bnr_big_id90009999.bin")
+        self.mdl = os.path.join(self.game, "data_mods/omnimix/d3/model/mdl_l44_bnr_big_id90009999.bin")
+        for p in (self.ifs, self.tex, self.mdl):
+            with open(p, "wb") as f:
+                f.write(b"x" * 16)
+        self.tbl = os.path.join(self.game, "data_mods/omnimix/music_info/music_omni.xml")
+        with open(self.tbl, "w", encoding="utf-8") as f:
+            f.write("<data_num __type=\"s32\">0</data_num>")
+        self.wd = os.path.join(self.tmp, "wd")
+        os.makedirs(self.wd)
+        self.state = os.path.join(self.wd, "state_90009999.json")
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"music_id": 90009999,
+                       "new_files": [{"path": self.ifs, "kind": "ifs"},
+                                     {"path": self.tex, "kind": "tex"},
+                                     {"path": self.mdl, "kind": "mdl"}],
+                       "backups": {}}, f)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_clean_uninstall_reports_clean(self):
+        r = N.uninstall(self.game, 90009999, workdir=self.wd)
+        self.assertTrue(r["clean"], "应报告 clean=True")
+        self.assertEqual(r["leftover"], [])
+        for p in (self.ifs, self.tex, self.mdl):
+            self.assertFalse(os.path.exists(p))
+        self.assertFalse(os.path.exists(self.state), "删干净了才该移除 state")
+
+    def test_leftover_keeps_state_and_reports(self):
+        """模拟"文件删不掉"：替换 os.remove 让它对 ifs 抛错。"""
+        real_remove = os.remove
+
+        def fake_remove(p):
+            if p == self.ifs:
+                raise OSError(32, "being used by another process")
+            return real_remove(p)
+        with mock.patch.object(os, "remove", side_effect=fake_remove):
+            r = N.uninstall(self.game, 90009999, workdir=self.wd)
+        self.assertFalse(r["clean"], "有残留时不能报 clean")
+        self.assertIn(self.ifs, r["leftover"])
+        self.assertTrue(r["failed"], "应记录失败原因")
+        self.assertTrue(os.path.exists(self.state),
+                        "有残留时必须保留 state，方便用户重试")
+
+
+class TestOrphanFiles(unittest.TestCase):
+    """孤儿文件：曲表没条目了，文件还留着。"""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="ub_orphf_")
+        self.game = os.path.join(self.tmp, "contents")
+        for sub in ("data_mods/omnimix/ifs_pack/d9000999",
+                    "data_mods/omnimix/d3/model",
+                    "data_mods/omnimix/music_info",
+                    "data"):
+            os.makedirs(os.path.join(self.game, sub), exist_ok=True)
+        self.tbl = os.path.join(self.game, "data_mods/omnimix/music_info/music_omni.xml")
+        # 曲表里**没有** 90009999
+        with open(self.tbl, "w", encoding="utf-8") as f:
+            f.write("<data_num __type=\"s32\">0</data_num>")
+        self.ifs = os.path.join(self.game, "data_mods/omnimix/ifs_pack/d9000999/90009999_msc.ifs")
+        self.tex = os.path.join(self.game, "data_mods/omnimix/d3/model/tex_l44_bnr_big_id90009999.bin")
+        for p in (self.ifs, self.tex):
+            with open(p, "wb") as f:
+                f.write(b"x" * 100)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_detects_orphan_files(self):
+        got = N.find_orphan_files(self.game)
+        ids = [x["music_id"] for x in got]
+        self.assertIn(90009999, ids)
+        rec = [x for x in got if x["music_id"] == 90009999][0]
+        self.assertEqual(len(rec["files"]), 2)
+        self.assertGreater(rec["size"], 0)
+
+    def test_dry_run_does_not_delete(self):
+        r = N.cleanup_orphan_files(self.game, dry_run=True)
+        self.assertTrue(r["dry_run"])
+        self.assertTrue(os.path.exists(self.ifs))
+
+    def test_cleanup_deletes(self):
+        r = N.cleanup_orphan_files(self.game)
+        self.assertFalse(os.path.exists(self.ifs))
+        self.assertFalse(os.path.exists(self.tex))
+        self.assertGreater(r["freed"], 0)
+        self.assertEqual(N.find_orphan_files(self.game), [])
+
+    def test_ignores_official_ids(self):
+        """官方 id（段内偏移小）不该被判成孤儿文件。"""
+        p = os.path.join(self.game, "data_mods/omnimix/d3/model/tex_l44_bnr_big_id90001000.bin")
+        with open(p, "wb") as f:
+            f.write(b"y" * 10)
+        ids = [x["music_id"] for x in N.find_orphan_files(self.game)]
+        self.assertNotIn(90001000, ids)
 
 
 if __name__ == "__main__":

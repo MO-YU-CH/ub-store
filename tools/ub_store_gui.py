@@ -1145,9 +1145,10 @@ class StoreGUI:
             bar, text="批量卸载(0)", style="Accent.TButton",
             command=self.batch_uninstall_installed)
         self.btn_batch_uninstall_all.pack(side="left", padx=(12, 4))
-        ttk.Button(bar, text="检查孤儿条目",
+        ttk.Button(bar, text="检查残留数据",
                    command=self.check_orphans).pack(side="left", padx=(12, 4))
-        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮）",
+        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮；"
+                            "「检查残留数据」会扫孤儿条目与孤儿文件）",
                   style="Dim.TLabel").pack(side="left", padx=8)
 
         self.installed_grid = CardGrid(
@@ -1157,72 +1158,110 @@ class StoreGUI:
         self.installed_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def check_orphans(self):
-        """检查"曲表里有、文件却没了"的自制谱条目（会让游戏报错/白框）。"""
+        """检查两类"卸载/删除没清干净"的残留：
+
+        A. **孤儿条目** —— 曲表里还有，文件却没了（游戏启动会报错/白框）
+        B. **孤儿文件** —— 文件还在，曲表里已无条目（白占空间，卸载没删干净）
+        """
         game = self._require_game()
         if not game:
             return
-        self.set_status("正在检查孤儿条目…")
+        self.set_status("正在检查残留数据…")
 
         def work():
-            return S.find_orphans(game)
+            return {"entries": S.find_orphans(game),
+                    "files": S.find_orphan_files(game)}
 
-        def done(orphans):
-            if not orphans:
-                self.set_status("检查完成：没有孤儿条目 ✅")
+        def done(res):
+            entries, files = res["entries"], res["files"]
+            if not entries and not files:
+                self.set_status("检查完成：没有残留 ✅")
                 messagebox.showinfo(
-                    "检查孤儿条目",
+                    "检查残留",
                     "没有发现问题。\n\n"
-                    "（曲表里的自制谱条目都有对应的文件）")
+                    "（曲表条目与文件一一对应，没有孤儿）")
                 return
-            lines = []
-            for o in orphans[:20]:
-                lines.append("   · id=%s  缺 %d 个文件"
-                             % (o["music_id"], len(o["missing"])))
-            if len(orphans) > 20:
-                lines.append("   … 还有 %d 个" % (len(orphans) - 20))
-            detail = "\n".join(lines)
+
+            parts = []
+            if entries:
+                parts.append("【孤儿条目】曲表里有、文件已丢失（会让游戏报错）：")
+                for o in entries[:10]:
+                    parts.append("   · music_id=%s  缺 %d 个文件"
+                                 % (o["music_id"], len(o["missing"])))
+                if len(entries) > 10:
+                    parts.append("   … 还有 %d 个" % (len(entries) - 10))
+                parts.append("")
+            if files:
+                total_mb = sum(f["size"] for f in files) / 1048576.0
+                parts.append("【孤儿文件】文件还在、曲表已无条目（白占 %.1f MB）："
+                             % total_mb)
+                for f in files[:10]:
+                    parts.append("   · music_id=%s  %d 个文件"
+                                 % (f["music_id"], len(f["files"])))
+                if len(files) > 10:
+                    parts.append("   … 还有 %d 个" % (len(files) - 10))
+                parts.append("")
+
+            n_items = len(entries) + len(files)
             if not messagebox.askyesno(
-                    "发现 %d 个孤儿条目" % len(orphans),
-                    "这些曲表条目在游戏里保留着，但文件已经不在了，\n"
-                    "游戏启动时会报错（贴图错误、甚至 SSD READ ERROR）：\n\n"
-                    "%s\n\n"
-                    "【是】= 立即清理这些曲表条目（会先自动备份曲表）\n"
-                    "【否】= 暂不处理" % detail):
-                self.set_status("发现 %d 个孤儿条目（未处理）" % len(orphans))
+                    "发现 %d 处残留" % n_items,
+                    "\n".join(parts) +
+                    "\n【是】= 立即清理（清理条目会自动备份曲表）\n"
+                    "【否】= 暂不处理"):
+                self.set_status("发现 %d 处残留（未处理）" % n_items)
                 return
-            self.set_status("正在清理 %d 个孤儿条目…" % len(orphans))
-
-            def work2():
-                return S.cleanup_orphans(game, [o["music_id"] for o in orphans])
-
-            def done2(res):
-                ok, fail = res["removed"], res["failed"]
-                self.set_status("孤儿清理完成：成功 %d，失败 %d" % (len(ok), len(fail)))
-                msg = []
-                if ok:
-                    msg.append("已清理 %d 个：" % len(ok))
-                    for mid, _bak in ok:
-                        msg.append("   · music_id=%s" % mid)
-                    msg.append("")
-                    msg.append("曲表已自动备份（同目录 *.bak_orphan_*）")
-                if fail:
-                    msg.append("")
-                    msg.append("失败 %d 个：" % len(fail))
-                    for mid, e in fail[:8]:
-                        msg.append("   · %s：%s" % (mid, str(e)[:70]))
-                messagebox.showinfo("孤儿清理完成", "\n".join(msg))
-                try:
-                    self.reload_installed()
-                except Exception:                            # noqa: BLE001
-                    pass
-
-            self.async_.run(work2, done2,
-                            lambda e: (messagebox.showerror("清理失败", str(e)),
-                                       self.set_status("清理失败：%s" % e)))
+            self._cleanup_all(game, entries, files)
 
         self.async_.run(work, done,
                         lambda e: (messagebox.showerror("检查失败", str(e)),
                                    self.set_status("检查失败：%s" % e)))
+
+    def _cleanup_all(self, game, entries, files):
+        self.set_status("正在清理残留…")
+
+        def work():
+            r1 = {"removed": [], "failed": []}
+            r2 = {"removed": [], "failed": [], "freed": 0}
+            if entries:
+                r1 = S.cleanup_orphans(game, [o["music_id"] for o in entries])
+            if files:
+                r2 = S.cleanup_orphan_files(game, [f["music_id"] for f in files])
+            return r1, r2
+
+        def done(res):
+            r1, r2 = res
+            ok1, fail1 = r1["removed"], r1["failed"]
+            ok2, fail2 = r2["removed"], r2["failed"]
+            mb = r2.get("freed", 0) / 1048576.0
+            self.set_status("清理完成：条目 %d，文件 %d 个（释放 %.1f MB）"
+                            % (len(ok1), len(ok2), mb))
+            msg = []
+            if ok1:
+                msg.append("已清理 %d 个孤儿条目：" % len(ok1))
+                for mid, _bak in ok1:
+                    msg.append("   · music_id=%s" % mid)
+                msg.append("（曲表已备份为 *.bak_orphan_*）")
+            if ok2:
+                msg.append("")
+                msg.append("已删除 %d 个孤儿文件，释放 %.1f MB：" % (len(ok2), mb))
+            for lst, label in ((fail1, "条目"), (fail2, "文件")):
+                if lst:
+                    msg.append("")
+                    msg.append("失败 %d 个%s：" % (len(lst), label))
+                    for it in lst[:8]:
+                        if isinstance(it, (tuple, list)):
+                            msg.append("   · %s：%s" % (it[0], str(it[1])[:70]))
+                        else:
+                            msg.append("   · %s" % str(it)[:80])
+            messagebox.showinfo("清理完成", "\n".join(msg))
+            try:
+                self.reload_installed()
+            except Exception:                                # noqa: BLE001
+                pass
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("清理失败", str(e)),
+                                   self.set_status("清理失败：%s" % e)))
 
     def _refresh_installed_batch_button(self):
         try:

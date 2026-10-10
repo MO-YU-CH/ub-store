@@ -1736,6 +1736,17 @@ def cleanup_orphans(game, music_ids=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 孤儿文件：曲表里没条目了，但文件还留着（卸载没删干净的残留）
+# ---------------------------------------------------------------------------
+def find_orphan_files(game) -> list:
+    return _newsong().find_orphan_files(game)
+
+
+def cleanup_orphan_files(game, music_ids=None, dry_run=False) -> dict:
+    return _newsong().cleanup_orphan_files(game, music_ids, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def _print_json(o):
