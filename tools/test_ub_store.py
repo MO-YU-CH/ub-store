@@ -1165,6 +1165,42 @@ class TestIdLedger(unittest.TestCase):
         self.assertIn(90009000, r["added"])
         self.assertIn("90009000", S.list_used_ids()["used"])
 
+
+    # ---- 同一首歌重装：沿用旧编号 ----
+    def test_same_song_reuses_its_id(self):
+        """用户要求：同一首歌卸载后重装，沿用原编号（重装=恢复原状）。"""
+        a = S.next_free_id(self.game, title="Saika", artist="Rabpit")
+        S.mark_id_used(a, title="Saika", artist="Rabpit")
+        b = S.next_free_id(self.game, title="Saika", artist="Rabpit")
+        self.assertEqual(a, b, "同一首歌应沿用旧编号")
+
+    def test_different_song_gets_new_id(self):
+        a = S.next_free_id(self.game, title="Saika")
+        S.mark_id_used(a, title="Saika")
+        b = S.next_free_id(self.game, title="Another Song")
+        self.assertNotEqual(a, b, "不同歌不能串号")
+        self.assertEqual(b, a - 1)
+
+    def test_reuse_falls_back_to_title_only(self):
+        """艺人字段常常缺失/写法不一 —— 只给曲名也要能命中。"""
+        a = S.next_free_id(self.game, title="Saika", artist="Rabpit")
+        S.mark_id_used(a, title="Saika", artist="Rabpit")
+        b = S.next_free_id(self.game, title="Saika")          # 不传艺人
+        self.assertEqual(a, b)
+
+    def test_no_title_always_new_id(self):
+        """没有曲名（手工调用）时按老规矩发新编号。"""
+        a = S.next_free_id(self.game)
+        S.mark_id_used(a)
+        b = S.next_free_id(self.game)
+        self.assertNotEqual(a, b)
+
+    def test_find_id_for_song(self):
+        S.mark_id_used(90009999, title="Saika", artist="Rabpit")
+        self.assertEqual(S.find_id_for_song("Saika", "Rabpit"), 90009999)
+        self.assertEqual(S.find_id_for_song("saika"), 90009999)     # 大小写无关
+        self.assertIsNone(S.find_id_for_song("Nope"))
+
     def test_exhaustion_raises(self):
         """用满后要明确报错，而不是静默回绕。"""
         d = {"used": {str(90000000 + off): {} for off in range(2000, 10000)}}

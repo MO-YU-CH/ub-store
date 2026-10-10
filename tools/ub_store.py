@@ -1545,15 +1545,18 @@ def one_click_install(folder: str, game=None, music_id=None, own_audio=True,
         grouping_category = (cfg.get("custom_grouping_category") or "").strip() or None
 
     if music_id is None:
-        # 自制谱编号：**从高往低找"从未分配过"的**（见 next_free_id 的说明）。
+        # 自制谱编号：**同一首歌沿用旧编号**，否则从高往低找"从未分配过"的
+        # （见 next_free_id 的说明）。
         # 起点优先用调用方指定 → config.json 的 custom_id_base → DEFAULT_BASE。
         # 🔴 关键：判据是"台账里没有 + 当前没占用"，**卸载不会把编号放回来**，
-        #    否则新曲会继承前一首的成绩。
+        #    否则别的歌复用该编号会继承前一首的成绩。
         base = (id_base
                 or int(cfg.get("custom_id_base") or 0)
                 or N.DEFAULT_BASE)
         sync_used_ids(game)                 # 首次升级时把已有自制谱补进台账
-        music_id = next_free_id(game, start=base)
+        music_id = next_free_id(game, start=base,
+                                title=card.get("title"),
+                                artist=card.get("artist"))
     else:
         # 手动指定时也要校验：跨段会让游戏闪退，贴官方尾部会撞号
         prob = N.id_problem(music_id)
@@ -1687,10 +1690,11 @@ def run_install(plan, apply=True, workdir=None, register_small=True, artist=None
     res = N.install(plan, apply=apply, workdir=wd)
     if apply and not res.get("dry_run"):
         # ★ 登记编号台账：分配过就永久占用，卸载也不释放
-        #   （否则新曲会继承旧曲的游戏成绩）
+        #   （否则别的歌复用该编号会继承前一首的成绩）
+        #   记下 title/artist 是为了"同一首歌重装能沿用旧编号"。
         try:
             mark_id_used(plan["music_id"], title=plan.get("title") or "",
-                         note="installed")
+                         note="installed", artist=artist)
         except Exception:                                    # noqa: BLE001
             pass
     if apply and register_small and not res.get("dry_run"):
@@ -1763,13 +1767,54 @@ def list_used_ids() -> dict:
     return _load_used_ids()
 
 
-def mark_id_used(music_id, title="", note="") -> dict:
+def _song_key(title, artist) -> str:
+    """同一首歌的匹配键：`曲名|艺人`（小写，去空白）。
+
+    与 BrowseSession._key_of 保持一致的约定，用于"重装同一首歌 → 沿用旧编号"。
+    标题直接取 Malody 的 title（现在已是原始标题/日文原名）。
+    """
+    t = (title or "").strip().lower()
+    a = (artist or "").strip().lower()
+    if not t:
+        return ""
+    return "%s|%s" % (t, a)
+
+
+def find_id_for_song(title, artist=None):
+    """在台账里找"同一首歌"曾经用过的编号；没有则 None。
+
+    匹配优先用完整键（曲名+艺人），退化到只比曲名（艺人字段常常为空或写法不一）。
+    """
+    key = _song_key(title, artist)
+    if not key:
+        return None
+    t = (title or "").strip().lower()
+    d = _load_used_ids()
+    hit = None
+    for k, rec in d["used"].items():
+        rk = rec.get("key") or _song_key(rec.get("title"), rec.get("artist"))
+        if rk and rk == key:
+            hit = int(k)
+            break
+        # 退化：曲名相同且（任一方没写艺人）
+        rt = (rec.get("title") or "").strip().lower()
+        if rt and rt == t and (not rec.get("artist") or not (artist or "").strip()):
+            hit = int(k)
+    return hit
+
+
+def mark_id_used(music_id, title="", note="", artist=None) -> dict:
     """把编号登记为"已用过"（永久占用）。已登记则只补充信息。"""
     d = _load_used_ids()
     k = str(int(music_id))
     rec = d["used"].setdefault(k, {})
     if title:
         rec["title"] = title
+    if artist:
+        rec["artist"] = artist
+    if title or artist:
+        rec["key"] = _song_key(title or rec.get("title"),
+                               artist or rec.get("artist"))
     if note:
         rec["note"] = note
     rec.setdefault("assigned_at", time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -1824,14 +1869,26 @@ def sync_used_ids(game=None) -> dict:
     return {"added": sorted(added), "total": len(d["used"])}
 
 
-def next_free_id(game, start=None) -> int:
-    """按"**从高往低**"顺序找下一个**从未分配给自制谱**的编号。
+def next_free_id(game, start=None, title=None, artist=None) -> int:
+    """给自制谱挑一个编号。
 
-    用户约定：从 `90009999` 开始往下记（9999→9000→8999→…→2000），
-    用满 8000 个位置后报错，提示手工干预。
-    判据 = **不在台账里** 且 **当前未被占用**（双保险）。
+    **规则**：
+      1. `title` 给定时，先看台账里**同一首歌**是否用过编号 → **沿用**。
+         （用户要求：卸载后重装同一首歌，沿用原来的编号；
+           这样重装=恢复原状，不会在游戏里多出一条同名曲，
+           也能保住这首歌原有的成绩。不同歌之间仍然绝不串号。）
+      2. 否则**从高往低**找"从未分配过"的：`9999 → 9000 → 8999 → … → 2000`
+      3. 判据 = **不在台账里** 且 **当前未被占用**（双保险）
+
+    用满后抛 StoreError（不静默回绕）。
     """
     N = _newsong()
+    # 1) 同曲沿用
+    if title:
+        prev = find_id_for_song(title, artist)
+        if prev is not None:
+            return prev
+    # 2) 新编号
     d = _load_used_ids()
     used = set(d["used"].keys())
     occ = N.scan_occupied(game)["union"]
