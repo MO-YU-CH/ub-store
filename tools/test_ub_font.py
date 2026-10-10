@@ -83,5 +83,51 @@ class TestRegister(unittest.TestCase):
             r.destroy()
 
 
+class TestSystemCjkDetect(unittest.TestCase):
+    """只读检测：判断系统是否已有中文字体（决定要不要动系统外观）。"""
+
+    def test_returns_bool(self):
+        r = F.system_has_cjk_font()
+        self.assertIsInstance(r, bool)
+
+    def test_current_machine_has_cjk(self):
+        """开发机是中文系统，应当检测到中文字体——这也意味着不会去改系统外观。"""
+        if os.name != "nt":
+            self.skipTest("非 Windows")
+        self.assertTrue(F.system_has_cjk_font(),
+                        "本机应能检测到中文字体（否则会误改系统 UI 字体）")
+
+
+class TestSessionUiFontShape(unittest.TestCase):
+    """只验证接口形态与常量，**不真的修改系统设置**。"""
+
+    def test_has_apis(self):
+        for name in ("install_session_ui_font", "restore_session_ui_font",
+                     "ensure_ui_font", "system_has_cjk_font"):
+            self.assertTrue(callable(getattr(F, name, None)), "缺少 %s" % name)
+
+    def test_spi_constants(self):
+        self.assertEqual(F.SPI_GETNONCLIENTMETRICS, 0x0029)
+        self.assertEqual(F.SPI_SETNONCLIENTMETRICS, 0x002A)
+        # 只广播、不写注册表持久项（不污染系统）
+        self.assertFalse(F.SPIF_SENDCHANGE & F.SPIF_UPDATEINIFILE)
+
+    def test_logfont_structure_size(self):
+        """LOGFONTW 布局必须正确，否则 SPI 调用会读错内存。"""
+        if os.name != "nt":
+            self.skipTest("非 Windows")
+        import ctypes
+        # 14 个字段：5×LONG + 8×BYTE + WCHAR[32] = 20 + 8 + 64 = 92
+        self.assertEqual(ctypes.sizeof(F._LOGFONTW), 92)
+
+    def test_ensure_ui_font_skips_when_system_has_cjk(self):
+        """系统已有中文字体时，不应去改会话界面字体。"""
+        if os.name != "nt" or not F.system_has_cjk_font():
+            self.skipTest("系统无中文字体，跳过")
+        info = F.ensure_ui_font()
+        self.assertFalse(info.get("session_ui"))
+        self.assertIn("已有中文字体", info.get("session_ui_note", ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

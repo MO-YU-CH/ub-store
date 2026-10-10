@@ -386,6 +386,21 @@ class StoreGUI:
                 self.set_status("已清理上次更新留下的旧文件")
         except Exception:                                    # noqa: BLE001
             pass
+        # 字体状态提示：标题栏/菜单栏由系统绘制，系统没有中文字体时
+        # 必须把**会话界面字体**也换掉才有救；这一步只在交互式会话里能做，
+        # 经 SSH/服务启动会拿到 1459(ERROR_REQUIRES_INTERACTIVE_WINDOWSTATION)。
+        try:
+            info = getattr(self, "_font_info", None) or {}
+            if info.get("session_ui"):
+                self.set_status("已启用自带字库（含标题栏/菜单）")
+            elif info.get("family") and info.get("had_cjk") is False:
+                note = str(info.get("session_ui_note") or "")
+                if "1459" in note:
+                    self.set_status("提示：需在桌面直接运行才能修复标题栏中文")
+                else:
+                    self.set_status("提示：标题栏字体未能切换（%s）" % note)
+        except Exception:                                    # noqa: BLE001
+            pass
         self._enable_drop()
         if U is None:
             return
@@ -502,10 +517,17 @@ class StoreGUI:
     # ---- 主题 ----
     def _setup_theme(self):
         r = self.root
-        # ★ 先挂自带字库：日文系统没有中文字体，否则界面简体字会全是方框
+        # ★ 先挂自带字库：
+        #   ① 注册到进程（tkinter 控件用）
+        #   ② 系统本身没有中文字体时，还把**当前会话的界面字体**也切过来——
+        #      否则窗口标题栏 / 菜单栏（系统绘制的非客户区）照样是方框。
+        self._font_info = {}
         try:
             if FONT is not None:
+                self._font_info = FONT.ensure_ui_font()
                 self._font_ok = FONT.apply_to_tk(r)
+            else:
+                self._font_ok = False
         except Exception:                                    # noqa: BLE001
             self._font_ok = False
         r.title(APP_TITLE)
@@ -1714,23 +1736,34 @@ def main(argv=None):
         print("selftest OK: tabs=%d" % len(app.notebook.tabs()))
         root.destroy()
         return 0
+    if "--restore-ui-font" in argv:
+        # 把会话界面字体恢复成系统默认（万一觉得改了系统外观不舒服）
+        if FONT is not None:
+            ok = FONT.restore_session_ui_font()
+            print("restore session ui font: %s" % ("OK" if ok else "失败"))
+        root.destroy()
+        return 0
     if "--fontcheck" in argv:
         # 字体自检：确认自带字库已注册、且中文/日文字形都能渲染（宽度 > 0）。
         # 用来在"没有中文字体的日文系统"上快速验证界面方框问题是否已解决。
         print("font module : %s" % ("有" if FONT is not None else "缺失"))
         if FONT is not None:
             print("font file   : %s" % FONT.font_path())
-            fam = FONT.register()
-            print("registered  : %s" % fam)
+            print("system cjk  : %s" % FONT.system_has_cjk_font())
+            info = FONT.ensure_ui_font()
+            print("registered  : %s" % info.get("family"))
+            print("session ui  : %s  (%s)" % (info.get("session_ui"),
+                                              info.get("session_ui_note")))
             print("applied     : %s" % FONT.apply_to_tk(root))
             try:
                 import tkinter.font as tkfont
-                f = tkfont.Font(root=root, family=fam or "TkDefaultFont", size=14)
+                f = tkfont.Font(root=root, family=info.get("family")
+                                or "TkDefaultFont", size=14)
                 bad = []
-                for ch in "谱铺载设删转检查确认装导更新包曲名艺人":
+                for ch in "谱铺载设删转检查确认装导更新包曲名艺人高级帮助":
                     if f.measure(ch) <= 0:
                         bad.append(ch)
-                for ch in "の漢あいうえお":
+                for ch in "の漢あいうえお峠辻畑":
                     if f.measure(ch) <= 0:
                         bad.append(ch)
                 print("cjk glyphs  : %s" % ("全部可渲染" if not bad
