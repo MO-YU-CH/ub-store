@@ -792,11 +792,19 @@ class Client:
         return res
 
     # ---- 公开只读 ----
-    def legacy_list(self, status=0, mode=MODE_PAD, count=30, page=0):
-        """匿名公开谱面列表（无需 token）。返回 {total, list:[...]}。"""
+    def legacy_list(self, status=0, mode=MODE_PAD, count=30, page=0, lang="jp"):
+        """匿名公开谱面列表（无需 token）。返回 {total, list:[...]}。
+
+        🔴 `lang` 决定标题语言：默认不带会返回"标准化标题"（罗马字/拼音/英文），
+        传 **`lang=jp`** 才会返回**原始标题**（日文原名）。
+        实测：不带 → 30 条里含中日文 0 条；`lang=jp` → 4 条。
+        注意参数值是 **`jp`** 而不是 ISO 标准的 `ja`（`ja` 无效）。
+        """
         base = (self.cfg.get("legacy_base") or DEFAULT_LEGACY_BASE).rstrip("/")
-        url = base + "/page/chart/filter?" + urllib.parse.urlencode(
-            {"status": status, "mode": mode, "count": count, "page": page})
+        q = {"status": status, "mode": mode, "count": count, "page": page}
+        if lang:
+            q["lang"] = lang
+        url = base + "/page/chart/filter?" + urllib.parse.urlencode(q)
         res = self.request(url)
         self._ok(res)
         data = res.get("data") or {}
@@ -940,12 +948,22 @@ class Client:
             raise StoreError(-1000, "未登录：请先在【登录】页登录后再使用该功能")
         return c.get("uid"), c.get("key")
 
-    def store_list(self, word="", mode=MODE_PAD, from_=0, uid=None, key=None):
-        """歌曲列表（登录后支持 word 搜索，按标题 LIKE）。商店接口 -> 用 storeKey。"""
+    def store_list(self, word="", mode=MODE_PAD, from_=0, uid=None, key=None,
+                   org=1):
+        """歌曲列表（登录后支持 word 搜索，按标题 LIKE）。商店接口 -> 用 storeKey。
+
+        🔴 `org` = **是否返回原始标题**（官方 API 文档的参数）：
+          · `org=0` → 返回"标准化标题"：上传时被要求转写成罗马字/拼音/英文的名字
+            （见 Malody wiki：非 Unicode 标题要转成纯 Unicode，中文转拼音、
+             其他语言转英文；有官方英文译名也可填这里）
+          · `org=1` → 返回**原始标题**（日文原名等）
+        默认取 1 —— 否则拉到一堆 "Ugoku, Ugoku" 这种罗马字，
+        用户看到会以为是我们把曲名英文化了。
+        """
         uid, key = self._store_auth(uid, key)
         res = self._api("/store/list", {"word": word or "", "mode": mode,
                                         "from": from_, "uid": uid, "key": key,
-                                        "api": 1})
+                                        "org": int(org), "api": 1})
         self._ok(res)
         return res
 

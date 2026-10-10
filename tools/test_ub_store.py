@@ -1063,5 +1063,45 @@ class TestDeleteDownloaded(BaseCase):
         self.assertTrue(r["warns"], "强制删除时应给出警告")
 
 
+class TestOriginalTitleLang(unittest.TestCase):
+    """曲名要取"原始标题"（日文原名），不是 Malody 标准化后的罗马字。
+
+    Malody 要求上传时把非 Unicode 标题转写成罗马字/拼音/英文（见其 wiki），
+    所以默认返回的 title 天生是罗马字；
+      · 商店接口 /store/list  用 org=1 取原名
+      · 匿名接口 /page/chart/filter 用 lang=jp 取原名（注意是 jp 不是 ja）
+    """
+
+    def test_store_list_sends_org(self):
+        import inspect
+        import ub_store as S
+        sig = inspect.signature(S.Client.store_list)
+        self.assertEqual(sig.parameters['org'].default, 1,
+                         "store_list 的 org 默认应为 1（返回原始标题）")
+        src = inspect.getsource(S.Client.store_list)
+        self.assertIn('"org": int(org)', src)
+
+    def test_legacy_list_sends_lang_jp(self):
+        import inspect
+        import ub_store as S
+        sig = inspect.signature(S.Client.legacy_list)
+        self.assertEqual(sig.parameters['lang'].default, "jp",
+                         "legacy_list 的 lang 默认应为 jp（返回原始标题）")
+        src = inspect.getsource(S.Client.legacy_list)
+        self.assertIn('q["lang"] = lang', src)
+
+    def test_browse_session_passes_them_through(self):
+        """BrowseSession 拉取时不能把这两个参数丢掉。"""
+        import inspect
+        import ub_store as S
+        src = inspect.getsource(S.BrowseSession._next_one_page)
+        self.assertIn('store_list(', src)
+        self.assertIn('legacy_list(', src)
+        # 两个调用都不应显式覆盖掉参数（保持默认即 lang=jp / org=1）
+        import re
+        self.assertNotIn('org=0', src)
+        self.assertNotIn('lang="', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
