@@ -1,299 +1,212 @@
-# ub-store — jubeat 本地机台工具链
+# ub-store — jubeat 自制谱商店
 
-针对 **jubeat beyond the Ave.（L44）** 本地机台的魔改工具集，核心是一套把
-**Malody 自制谱** 转成 jubeat 可玩的谱面并自动装进游戏的完整链路，外加谱面格式解析、
-贴图编解码、音频编解码、官方更新包处理等底层工具。
+给 **jubeat beyond the Ave.（L44）** 本地机台用的自制谱工具。
+
+**做什么**：从 Malody 谱库浏览 / 下载自制谱 → 一键装进游戏 → 随时卸载。
+带图形界面，**下载即用，不需要装 Python 或任何依赖**。
 
 > ⚠️ **免责声明**
-> 本项目**仅供个人备份与研究**。jubeat 是 KONAMI 的注册商标，游戏本体、曲目、贴图、
-> 音频等一切资源的版权归 KONAMI 所有。**本仓库不包含任何游戏资源**（贴图 / 曲名 /
-> 音频 / 谱面数据均无），只有处理这些资源的**工具代码**。请勿用于商业用途或二次分发
-> 游戏资源；因使用本工具产生的任何后果由使用者自负。
+> 本项目**仅供个人备份与研究**。jubeat 是 KONAMI 的注册商标，游戏本体、曲目、
+> 贴图、音频等一切资源的版权归 KONAMI 所有。**本仓库不含任何游戏资源**，
+> 只有工具代码。请勿用于商业用途或二次分发游戏资源；使用后果自负。
 
 ---
 
-## 功能
+## 一、快速获取
 
-| 模块 | 作用 |
+1. 打开 **[Releases 页面](https://github.com/MO-YU-CH/ub-store/releases)**
+2. 下载最新版的 **`ub_store.exe`**（约 48 MB）
+3. **放到任意目录**双击运行即可
+
+**没有安装步骤**，也不用装 Python、ffmpeg、字体——这些都已经打包进 exe 了。
+
+> **要放到哪里？** 建议放在**游戏目录之外**（比如桌面新建个文件夹）。
+> 程序会在自己旁边生成 `ub_store_data/` 存放下载缓存与配置，便携、可整个搬走。
+
+**首次运行**会自动探测游戏目录；探不到会让你手动指定（选到 **`contents`** 那一层）。
+
+---
+
+## 二、使用说明
+
+界面分四页：**谱库浏览 / 已下载 / 已装自制谱 / 登录**。
+
+### 典型流程
+
+```
+① 【登录】页  → 用 Malody 账号登录（不登录也能浏览，但下载会被拒）
+② 【谱库浏览】→ 翻页找谱 / 用关键词过滤 → 勾选 → 【批量下载】或单卡下载
+③ 【已下载】  → 点【一键安装】，装进游戏
+④ 启动游戏，选曲界面就能看到新曲了
+```
+
+### 谱库浏览
+
+- **翻页**：一次会预取两页，翻页基本不用等
+- **过滤**：按曲名 / 艺人 / 作者搜；**「只要纯 Pad(ub)」** 默认勾选（jubeat 是 Pad 模式）
+- **曲名是日文原名**（不是罗马字）—— 拉取时会主动索取原始标题
+
+### 一键安装
+
+点卡片下方的【一键安装】即可。程序会自动：
+
+- 选一个**没用过的编号**
+- 把谱面、曲绘、音源、曲名条都装好
+- 曲名前会加 `[自制]` 前缀，方便在游戏里认出来
+
+**安装前会自动备份曲表 / 包表**，出问题能回退。
+
+### 卸载 / 删除（两个不一样）
+
+| 按钮 | 作用 |
 |---|---|
-| `ub_store.py` | **Malody 商店客户端核心**：登录、浏览（商店 + 公开库双来源增量拉取）、下载 |
-| `ub_store_gui.py` | 上述功能的图形界面（tkinter） |
-| `ub_newsong.py` | **新曲注册引擎**：选空闲 music_id、补齐曲表/包表条目、**只新增不覆盖** |
-| `ub_chart.py` | Malody `.mc` / `.mcz` → jubeat `.eve` 谱面转换；`_msc.ifs` 容器读写 |
-| `ub_audio.py` | **Konami BMP / OKI4S ADPCM** 音频编解码 + ffmpeg 解码 + 预览切片 |
-| `tdxt_encode.py` | **TDXT / PXET 贴图**编解码（12 种像素格式 + DXT1/3/5 + LZSS） |
-| `ub_version.py` | `theme_info` 版本分类注册表增删（自动备份、可精确回退） |
-| `ub_updater.py` | 官方增量更新包处理（剔除删除标记、合并曲表 / 包表） |
-| `ub_patcher.py` | DLL 补丁反汇编 + 跨版本重定位（wildcard 签名 + capstone 语义校验） |
-| `ub_update.py` | **自更新**：从 GitHub Releases 检查并替换自身（无 Release 时回退读仓库内 `VERSION`） |
-| `ub_import.py` | **本地导入**：把自备的谱面文件 / 官方更新包接进安装链路 |
-| `ub_font.py` | **自带字库**：把打包的思源黑体注册到进程，解决日文系统无中文字体导致界面方框 |
-| `ub_verify_exe.py` | 校验 PyInstaller onefile exe 里内嵌的代码（PYZ + CArchive 双路径） |
+| **卸载** | 从**游戏**里移除（曲表、贴图、文件全部回滚） |
+| **删除** | 只清**本地下载的文件**（`ub_store_data/cache/`） |
+
+> 已装进游戏的谱面点【删除】时，会先问你要不要**一并卸载**——建议选是，
+> 否则游戏里会留下一条无效曲目（表现为曲名异常、甚至报错）。
+
+### 批量操作
+
+三个页面都支持多选：
+
+- **勾选**：点卡片**左上角的方框**
+- **全选 / 清空 / 反选**：页面顶部的批量条
+- **批量下载 / 批量安装 / 批量卸载 / 批量删除**：按钮上会显示当前勾选数量
+- 批量结束后会弹窗汇总**成功与失败明细**
+
+> **卸载前请先关闭游戏**，否则文件被占用会删不掉。
+
+### 编号台账（重要）
+
+程序给每首自制谱分配一个**专属编号**，并且**用过的编号永不回收**。
+
+**为什么？** jubeat 的成绩是**按编号存档**的。如果卸载后把编号放回去给下一首用，
+**新曲会继承旧曲的成绩**（分数、达成率显示错乱）。
+
+- 编号从 **`90009999` 开始往下**分配：`9999 → 9000 → 8999 → … → 2000`
+- 共约 **8000 个位置**，够用很久
+- 想看已用编号 → **【已装自制谱】页 → 【编号台账】**
+
+### 检查残留数据
+
+偶尔会因"游戏在运行导致文件删不掉"而留下残留。**【已装自制谱】页 → 【检查残留数据】** 会扫两类问题：
+
+- **孤儿条目**：曲表里有、文件丢了 → 游戏会报错 / 显示白框
+- **孤儿文件**：文件还在、曲表没条目 → 白占空间
+
+扫出来会列清楚，确认后一并清理（清条目时会**自动备份曲表**）。
+
+### 导入本地文件
+
+不一定非要走商店下载，自己手上的谱面 / 官方更新包也能喂进来：
+
+- **菜单** `文件 → 导入谱面文件…`（`.mc` / `.mcz`，可多选）
+- **菜单** `文件 → 导入官方更新包…`（`.7z` / `.zip`，会先扫描预览，含删除标记会单独警告）
+- **拖放**：把文件 / 文件夹**直接拖到程序窗口上**
+
+> 同目录放了多个谱面也没关系，程序会为每个谱面自动建暂存目录，逐个装、互不覆盖。
+
+### 自更新
+
+**帮助 → 检查更新…**，或者启动时自动静默检查（只写状态栏，不弹窗）。
 
 ---
 
-## 环境要求
+## 三、常见问题
 
-- **Python 3.7 或 3.8**（32 位；见下方「Windows 7 注意事项」）
-- `Pillow`（贴图处理）
-- `kbinxml`（**必须 `==1.7`**）+ `lxml`（`==4.9.4`）—— 解析 Konami 的二进制 XML
-  （`_msc.ifs` 的 `imgfs` 清单）。⚠️ `kbinxml` 2.0+ 用了 PEP 604 的 `X | Y`
-  类型注解，**Python 3.7 连语法都不认**，所以必须钉在 1.7
-- **ffmpeg**（音源解码；见下方「ffmpeg 怎么放」）
-- 可选：`pyinstaller`（自行打包）
+**Q：界面上全是方框（tofu）？**
+已内置中文字库并随 exe 打包，正常不会出现。若仍有，说明 exe 不完整，重新下载。
+
+**Q：装完进入游戏就闪退？**
+编号越界导致。**请务必用本程序的默认编号分配**（从 `90009999` 往下），
+不要手工指定跨段的编号。已装出问题的，用【检查残留数据】清理。
+
+**Q：曲名显示成白框？**
+曲名是**预渲染贴图**，用游戏自带字体渲染。重新安装一次即可（字体回退链已修好）。
+
+**Q：音乐和谱面对不上 / 音乐开始太早？**
+已修复（转谱时会应用 Malody 的音源偏移）。**重新安装**该谱即可生效。
+
+**Q：曲绘颜色不对（红色变蓝）？**
+已修复（贴图通道序）。同样**重新安装**才生效。
+
+**Q：为什么要登录？**
+Malody 的下载接口需要账号令牌。不登录可以浏览，但点下载会返回无权限。
+
+**Q：提示"找不到 ffmpeg"？**
+已内置，正常不会出现。若确有，设环境变量 `UB_FFMPEG` 指向你的 `ffmpeg.exe`。
+
+**Q：怎么确认程序状态？**
+命令行跑 `ub_store.exe --depcheck`，会打印依赖版本、ffmpeg 路径、模块加载情况。
+
+---
+
+## 四、开发者：从源码构建
+
+<details>
+<summary>点开查看（普通用户不用管）</summary>
+
+### 环境
+
+- **Python 3.7 或 3.8（32 位）**——见下方 Win7 说明
+- 依赖：`Pillow`、`kbinxml==1.7`、`lxml==4.9.4`
 
 ```bash
 pip install Pillow "kbinxml==1.7" "lxml==4.9.4"
 ```
 
-### ffmpeg
+- **ffmpeg**：打包版已内置（4.4.1）。自行构建时放到 `tools/assets/ffmpeg.exe`。
 
-安装谱面时要用 ffmpeg 把音源（ogg/mp3/…）解码成 PCM。
-
-**打包好的 exe 已经内置了 ffmpeg**（4.4.1，解包到临时目录直接用），
-所以最终用户**什么都不用装**。
-
-自行从源码构建时，把 ffmpeg 放到 `tools/assets/ffmpeg.exe`（spec 会打进包）。
-程序按以下顺序查找：
-
-1. 环境变量 `UB_FFMPEG` 指定的完整路径
-2. **内置的**（`_MEIPASS/assets/ffmpeg.exe`，即打包时带进去的那份）
-3. 主程序同目录（及其 `assets/`、`bin/`、`ffmpeg/` 子目录）
-4. `D:\ffmpeg\bin\` / `C:\ffmpeg\bin\`
-5. 系统 PATH
-
-> ⚠️ **必须用支持 Windows 7 的版本**：实测 2025 年的新版 ffmpeg 在 Win7 上
-> 直接 `0xC0000005` 崩溃（用了新 API）。本项目用 **ffmpeg 4.4.1-essentials**
-> （gyan.dev 构建），实测解码正常，且只有 73.8 MB（新版 140 MB）。
+> ⚠️ `kbinxml` 2.0+ 用了 PEP 604 的 `X | Y` 类型注解，**Python 3.7 语法都不认**，
+> 必须钉在 **1.7**。
 >
-> ```
-> # 获取（任一）
-> ffmpeg-4.4.1-essentials_build.zip  →  bin/ffmpeg.exe  →  tools/assets/ffmpeg.exe
-> ```
+> ⚠️ ffmpeg **必须用支持 Win7 的版本**（本项目用 4.4.1-essentials）：
+> 2025 年的新版在 Win7 上直接 `0xC0000005` 崩溃。
 
-用 `ub_store.exe --depcheck` 可以看到当前实际用的是哪个 ffmpeg。
-
----
-
-## 快速开始
-
-### 图形界面（推荐）
+### 运行 / 测试
 
 ```bash
-python ub_store_gui.py
+python ub_store_gui.py          # 图形界面
+python -m unittest discover -s tools -p "test_*.py"   # 全部测试
 ```
 
-界面分四页：**谱库浏览 / 已下载 / 已装自制谱 / 登录**。
-
-典型流程：登录 Malody 账号 → 谱库浏览里翻页 / 过滤（默认只显示纯 Pad 谱）→
-下载 → 到「已下载」页点「一键安装」。
-
-### 命令行
+### 自行打包
 
 ```bash
-# 查看某下载目录的信息
-python ub_newsong.py list-ids --game "<游戏根>/contents"
-
-# 生成安装计划（不落盘，先看要动哪些文件）
-python ub_newsong.py plan --game "<游戏根>/contents" --mcz chart.mc --out plan.json
-
-# 实际安装
-python ub_newsong.py install --game "<游戏根>/contents" --plan plan.json
-
-# 卸载（按 music_id 精确回退）
-python ub_newsong.py uninstall --music-id 90001036 --game "<游戏根>/contents"
+python -m PyInstaller tmp/ub_store.spec
 ```
 
-> 「游戏根」= 包含 `contents` 的那一层；`contents` 里应有 `spice.exe` 与 `data/`。
+### 🔴 Windows 7 打包注意
 
-### 导入本地文件
+**目标机是 Win7 时，必须用 Python ≤ 3.7 打包。**
 
-不一定非要走商店下载——你自己手上的谱面、或官方更新包，都能直接喂给程序。
+Python 3.8 起加载 `.pyd` 改用 `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`，
+这套 flag 由 **KB2533623** 引入；**Win7 SP1 未装该补丁时 `LoadLibraryExW`
+直接返回 `ERROR_INVALID_PARAMETER (87)`**，现象是「内置模块全正常、
+所有独立 `.pyd`（`_socket`/`_tkinter`/`_ssl`…）全挂」。
 
-**方式一：菜单**（`文件` 菜单）
-
-- **导入谱面文件…** — 选 `.mc` / `.mcz`（可多选）。程序会**自动带上同目录的音源与封面**，
-  所以把谱面和 `.ogg`/`.jpg` 放一起就行。
-- **导入官方更新包…** — 选 `.7z` / `.zip`。程序先**扫描预览**（条目数、谱面/贴图数量），
-  若包内含**删除标记**会单独警告并让你决定是否执行删除；应用前**自动备份**。
-
-**方式二：投放目录**
-
-`文件 → 打开导入目录`，把文件全丢进去，然后 `文件 → 扫描导入目录`。适合一次导入一批。
-
-**方式三：拖放**
-
-直接把文件/文件夹**拖到程序窗口上**即可（原生 `WM_DROPFILES`，不依赖任何第三方库）。
-也可以把文件拖到 **exe 图标**上启动。
-
-> **一个目录里放了多个谱面怎么办？**
-> 安装器是按「目录」工作的，同一目录里只会取体积最大的那个谱面。所以
-> `ub_import.py` 检测到这种情况时，会为每个谱面**自动建暂存目录**（把谱面连同
-> 同目录的音源/封面复制过去），逐个安装、互不覆盖；只有一个谱面时则**零拷贝**直接安装。
-> 暂存目录在安装结束后自动清理。
-
-### 自带字库（日文系统防方框）
-
-界面里大量使用简体中文，但**日文版 Windows 不带任何中文字体**
-（实测目标机 `Fonts` 目录只有 `meiryo.ttc` / `msgothic.ttc`）。
-而代码里写的 `font=("", N)` 取的是"系统默认字体"，在日文系统上就是 MS UI Gothic，
-不含简体字形 ⇒ 界面上一堆方框（tofu）。
-
-解决办法是**把字体随 exe 一起打包**：
-
-1. `tools/assets/ub_cjk_font.otf` —— 由 `tools/_make_font.py` 从**思源黑体 SC**
-   （SIL OFL 授权，可自由分发）裁剪而来，保留 **CJK 统一汉字全字集 + 假名 + 全角标点**，
-   共约 2.3 万字（9 MB），确保曲名/艺人名不会缺字。
-2. `ub_font.py` 在启动时用
-   `AddFontResourceExW(path, FR_PRIVATE, 0)` 把字体**注册到当前进程**
-   （`FR_PRIVATE` = 不写系统字体目录、不需要管理员权限、不污染系统），
-   再把 tkinter 的 `TkDefaultFont` 等命名字体切过去。
-
-> ⚠️ 注册时**不要**调用 `SendMessageW(HWND_BROADCAST, WM_FONTCHANGE)` 通知系统——
-> 那是同步广播，只要有一个窗口不处理该消息就会把本进程卡死。
-> `FR_PRIVATE` 注册的字体对本进程新建的字体对象立即生效，无需广播。
-
-重新生成字体（换字体或调整保留范围时）：
-
-```bash
-pip install fonttools
-python tools/_make_font.py <源字体.otf> tools/assets/ub_cjk_font.otf
-```
-
-### 自更新
-
-```bash
-python ub_update.py --check                          # 看有没有新版
-python ub_update.py --install                        # 下载并替换自身
-```
-
-界面上则是 **帮助 → 检查更新…**；启动时也会做一次静默检查（只写状态栏，不弹窗）。
-把 `config.json` 里的 `check_update_on_start` 设为 `false` 可完全关闭。
-
----
-
-## 配置
-
-配置文件在**程序同目录**的 `ub_store_data/config.json`（便携模式，首次运行自动生成）：
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `proxy` | `""` | **默认直连**。需要代理时在【高级 → 网络代理设置…】里填 |
-| `custom_title_marker` | `"[自制]"` | 自制曲曲名前缀（渲染到分组图集） |
-| `custom_reading_prefix` | `"ジセイ"` | 曲表 `name_string` 的假名前缀（按假名搜「ジセイ」可筛出） |
-| `store_pad_only` | `true` | 谱库只显示纯 Pad（jubeat）谱 |
-| `check_update_on_start` | `true` | 启动时静默检查更新 |
-| `browse_anon_pages` | `10` | 公开库每个 status 最多翻几页（该接口限速） |
-| `custom_id_base` | `99900000` | **自制谱 music_id 起始段**，见下方「⚠️ 编号必须远离官方段」 |
-
-### ⚠️ 编号必须远离官方段（否则会被官方更新包撞掉）
-
-官方 `music_id` 的编号规律是 **`世代 × 1000000 + 序号`**：
-
-```
-10000036 … 10000070     世代 10
-11000001 … 11001010     世代 11
-20000002 … 20000125     世代 20
-        ⋮
-90000001 … 90001035     世代 90  ← beyond the Ave.（当前）
-```
-
-每个世代的段内序号**只用到 1~1010 左右**，而且官方**下个更新包会从 90001036 继续往后排**。
-
-所以自制谱**绝不能**紧贴官方尾部编号——老版本默认的 `90001036` 正是踩在这个雷上，
-装一次官方更新就会撞 id。
-
-本项目的做法：
-
-- **默认起点 `99900000`**（99 段里 90 万偏移处）。与官方当前最大值相隔约 **990 万**，
-  且即便官方将来用到 99 段，也只占到 `99 001010` 左右，离 `99 900000` 差着 89 万位。
-- **自动纠正**：万一有人把 `custom_id_base` 改回官方规律区，
-  `recommend_ids()` 会调用 `safe_base()` 把它挪到安全位置，并在返回信息里说明。
-- 用 `is_official_style_id()` 可以判断某个 id 是否落在官方规律内（段内偏移 < `OFFICIAL_SEQ_LIMIT` 即视为会被官方占用）。
-
-> 已有自制谱**不受影响**（`scan_occupied()` 会照常把它们算作已占用）。
-> 但如果你之前用旧默认值装过谱面，建议注意它们占的是 `90001036~` 这段——
-> 将来官方更新到这些 id 时需要处理。
-
----
-
-## 自行打包
-
-用 PyInstaller：
-
-```bash
-python -m PyInstaller --onefile --noconsole --name ub_store \
-  --paths . --hidden-import ub_newsong --hidden-import ub_chart \
-  --hidden-import ub_updater --hidden-import tdxt_encode --hidden-import ub_audio \
-  ub_store_gui.py
-```
-
-### 🔴 Windows 7 注意事项（非常重要）
-
-**目标机是 Windows 7 时，必须用 Python ≤ 3.7 打包。**
-
-原因：Python 3.8 起，加载扩展模块（`.pyd`）改用了
-`LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`
-（见 CPython `Python/dynload_win.c`，改动来自 bpo-36085）。这套 flag 由
-**KB2533623** 引入，**Win7 SP1 未装该补丁时 `LoadLibraryExW` 会直接返回
-`ERROR_INVALID_PARAMETER (87)`**，表现为：
-
-> 内置模块（`math`/`zlib`/…）全部正常，但**所有独立 `.pyd`
-> （`_socket`/`_ctypes`/`_tkinter`/`_ssl`…）全部加载失败**。
-
-| Python | 加载 `.pyd` 的 flag | 缺 KB2533623 时 |
+| Python | 加载 `.pyd` 的 flag | 缺 KB2533623 |
 |---|---|---|
 | ≤ 3.7 | `LOAD_WITH_ALTERED_SEARCH_PATH` | **可用** ✅ |
 | ≥ 3.8 | `LOAD_LIBRARY_SEARCH_*` | **报错 87** ❌ |
 
-两条路任选：
+两条路：① 给目标机装 KB2533623；② **用 Python 3.7 打包**（本项目采用）。
 
-1. **给目标机装 KB2533623**（`Windows6.1-KB2533623-x86/x64.msu`），之后 3.8 也能用；
-2. **用 Python 3.7 打包**（本仓库采用这条，不需要动机台）。
+另外 spec 里建议**过滤掉随包分发的 CRT**（`vcruntime140.dll`、`ucrtbase.dll`…），
+让程序用系统的，否则可能把构建机的 DLL 带过去引起冲突。
 
-另外打包时建议在 `.spec` 里**过滤掉随包分发的 CRT**，让程序用系统的：
-
-```python
-_EXCLUDE = ('vcruntime140.dll', 'vcruntime140_1.dll',
-            'ucrtbase.dll', 'msvcp140.dll', 'concrt140.dll')
-a.binaries = [b for b in a.binaries
-              if not any(b[0].lower().startswith(x) for x in _EXCLUDE)]
-```
-
-否则 PyInstaller 会从**构建机**的 `System32` 抓一份 `VCRUNTIME140.dll` 打进包，
-在目标机上可能与系统版本冲突。
-
----
-
-## 目录结构
+### 工程结构
 
 ```
-tools/            工具与测试（本仓库主体）
-docs/             设计文档与排查报告（机制说明、格式分析、踩坑记录）
+tools/    工具与测试（仓库主体）
+docs/     设计文档与排查报告
 ```
 
-文档按主题命名，`ub_` 开头的是 jubeat 相关。比较值得先读的：
+值得先读的文档：`ub_项目总纲与后续规划.md`、`ub_版本档机制全解.md`、
+`ub_图集名额与版本位机制.md`、`ub_mscifs容器破解报告.md`。
 
-- `ub_项目总纲与后续规划.md` — 全貌
-- `ub_版本档机制全解.md` — 曲表 `<version>` 位掩码与版本分类
-- `ub_图集名额与版本位机制.md` — 分组图集与贴图注册
-- `ub_mscifs容器破解报告.md` — `_msc.ifs` 容器格式
-- `ub_更新器设计与现状.md` — 官方增量包处理
-
----
-
-## 测试
-
-```bash
-cd tools
-python test_ub_update.py     # 自更新（离线，全用桩）
-python test_ub_newsong.py    # 难度分档规则
-python test_ub_audio.py      # 音频编解码
-python test_ub_version.py    # 版本分类
-python test_ub_grouptex.py   # 分组图集
-python test_ub_store.py      # 商店客户端（含网络层桩）
-python test_ub_store_gui.py  # GUI（需要可用显示）
-```
+</details>
 
 ---
 
