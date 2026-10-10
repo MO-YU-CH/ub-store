@@ -25,6 +25,9 @@ _probe/
 _MEI*/
 
 # ---- 游戏资源（版权属 KONAMI，绝不入库）----
+# 但 release/ 下是我们自己的构建产物，作为自更新下载源，需要入库
+!release/*.exe
+!VERSION
 *.ifs
 *.bin
 *.pac
