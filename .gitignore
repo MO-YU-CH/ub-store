@@ -1,0 +1,57 @@
+# ---- 构建产物 ----
+build/
+dist/
+dist*/
+*.spec
+*.exe
+*.dll
+*.pdb
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+
+# ---- 临时/工作目录 ----
+tmp/
+temp/
+out/
+shots/
+tests/
+_probe/
+_MEI*/
+
+# ---- 游戏资源（版权属 KONAMI，绝不入库）----
+*.ifs
+*.bin
+*.pac
+*.eve
+*.mc
+*.mcz
+*.mcz
+*.ogg
+*.mp3
+*.wav
+*.png
+*.jpg
+*.img
+*.tdxt
+
+# ---- 私有配置与凭据 ----
+ub_store_data/
+config.json
+credentials.json
+*.key
+*.pem
+id_ed25519*
+known_hosts
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
