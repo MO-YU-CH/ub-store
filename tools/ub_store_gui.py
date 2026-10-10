@@ -42,6 +42,10 @@ try:
     import ub_updater as UU                # 官方更新包应用器
 except Exception:                                        # noqa: BLE001
     UU = None
+try:
+    import ub_font as FONT                 # 自带 CJK 字库（日文系统防方框）
+except Exception:                                        # noqa: BLE001
+    FONT = None
 
 APP_TITLE = "jubeat 自制谱商店 — Malody 谱库 → 下载 → 装进 jubeat"
 DISCLAIMER = (
@@ -390,7 +394,7 @@ class StoreGUI:
     # ---- 拖放（原生 WM_DROPFILES，不依赖 tkinterdnd2）----
     def _enable_drop(self):
         """把文件拖到窗口上即可导入。任何环节失败都静默跳过，不影响主功能。"""
-        if os.name != "nt" or "--selftest" in sys.argv:
+        if os.name != "nt" or "--selftest" in sys.argv or "--fontcheck" in sys.argv:
             return
         try:
             import ctypes
@@ -403,7 +407,12 @@ class StoreGUI:
 
             WM_DROPFILES = 0x0233
             GWLP_WNDPROC = -4
-            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND,
+            # WNDPROC 的返回类型必须按指针宽度来：LRESULT 在 64 位下是 64 位，
+            # 用 c_long（32 位）会在回调返回时被截断，ctypes 报
+            # "Exception ignored while converting result of ctypes callback"。
+            LRESULT = (ctypes.c_ssize_t if ctypes.sizeof(ctypes.c_void_p) == 8
+                       else ctypes.c_long)
+            WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND,
                                          ctypes.c_uint, wintypes.WPARAM,
                                          wintypes.LPARAM)
             if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -487,6 +496,12 @@ class StoreGUI:
     # ---- 主题 ----
     def _setup_theme(self):
         r = self.root
+        # ★ 先挂自带字库：日文系统没有中文字体，否则界面简体字会全是方框
+        try:
+            if FONT is not None:
+                self._font_ok = FONT.apply_to_tk(r)
+        except Exception:                                    # noqa: BLE001
+            self._font_ok = False
         r.title(APP_TITLE)
         r.geometry("1120x740")
         r.minsize(940, 620)
@@ -1691,6 +1706,31 @@ def main(argv=None):
         # 无头自检：建窗、构造控件、立刻退出（不 mainloop）
         root.update_idletasks()
         print("selftest OK: tabs=%d" % len(app.notebook.tabs()))
+        root.destroy()
+        return 0
+    if "--fontcheck" in argv:
+        # 字体自检：确认自带字库已注册、且中文/日文字形都能渲染（宽度 > 0）。
+        # 用来在"没有中文字体的日文系统"上快速验证界面方框问题是否已解决。
+        print("font module : %s" % ("有" if FONT is not None else "缺失"))
+        if FONT is not None:
+            print("font file   : %s" % FONT.font_path())
+            fam = FONT.register()
+            print("registered  : %s" % fam)
+            print("applied     : %s" % FONT.apply_to_tk(root))
+            try:
+                import tkinter.font as tkfont
+                f = tkfont.Font(root=root, family=fam or "TkDefaultFont", size=14)
+                bad = []
+                for ch in "谱铺载设删转检查确认装导更新包曲名艺人":
+                    if f.measure(ch) <= 0:
+                        bad.append(ch)
+                for ch in "の漢あいうえお":
+                    if f.measure(ch) <= 0:
+                        bad.append(ch)
+                print("cjk glyphs  : %s" % ("全部可渲染" if not bad
+                                            else "缺字形 %s" % "".join(bad)))
+            except Exception as ex:                          # noqa: BLE001
+                print("glyph check : 失败 %s" % ex)
         root.destroy()
         return 0
     # 命令行带路径（把文件拖到 exe 图标上、或从"发送到"调用）→ 启动后直接导入

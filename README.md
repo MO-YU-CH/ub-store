@@ -27,6 +27,7 @@
 | `ub_patcher.py` | DLL 补丁反汇编 + 跨版本重定位（wildcard 签名 + capstone 语义校验） |
 | `ub_update.py` | **自更新**：从 GitHub Releases 检查并替换自身（无 Release 时回退读仓库内 `VERSION`） |
 | `ub_import.py` | **本地导入**：把自备的谱面文件 / 官方更新包接进安装链路 |
+| `ub_font.py` | **自带字库**：把打包的思源黑体注册到进程，解决日文系统无中文字体导致界面方框 |
 | `ub_verify_exe.py` | 校验 PyInstaller onefile exe 里内嵌的代码（PYZ + CArchive 双路径） |
 
 ---
@@ -100,6 +101,34 @@ python ub_newsong.py uninstall --music-id 90001036 --game "<游戏根>/contents"
 > `ub_import.py` 检测到这种情况时，会为每个谱面**自动建暂存目录**（把谱面连同
 > 同目录的音源/封面复制过去），逐个安装、互不覆盖；只有一个谱面时则**零拷贝**直接安装。
 > 暂存目录在安装结束后自动清理。
+
+### 自带字库（日文系统防方框）
+
+界面里大量使用简体中文，但**日文版 Windows 不带任何中文字体**
+（实测目标机 `Fonts` 目录只有 `meiryo.ttc` / `msgothic.ttc`）。
+而代码里写的 `font=("", N)` 取的是"系统默认字体"，在日文系统上就是 MS UI Gothic，
+不含简体字形 ⇒ 界面上一堆方框（tofu）。
+
+解决办法是**把字体随 exe 一起打包**：
+
+1. `tools/assets/ub_cjk_font.otf` —— 由 `tools/_make_font.py` 从**思源黑体 SC**
+   （SIL OFL 授权，可自由分发）裁剪而来，保留 **CJK 统一汉字全字集 + 假名 + 全角标点**，
+   共约 2.3 万字（9 MB），确保曲名/艺人名不会缺字。
+2. `ub_font.py` 在启动时用
+   `AddFontResourceExW(path, FR_PRIVATE, 0)` 把字体**注册到当前进程**
+   （`FR_PRIVATE` = 不写系统字体目录、不需要管理员权限、不污染系统），
+   再把 tkinter 的 `TkDefaultFont` 等命名字体切过去。
+
+> ⚠️ 注册时**不要**调用 `SendMessageW(HWND_BROADCAST, WM_FONTCHANGE)` 通知系统——
+> 那是同步广播，只要有一个窗口不处理该消息就会把本进程卡死。
+> `FR_PRIVATE` 注册的字体对本进程新建的字体对象立即生效，无需广播。
+
+重新生成字体（换字体或调整保留范围时）：
+
+```bash
+pip install fonttools
+python tools/_make_font.py <源字体.otf> tools/assets/ub_cjk_font.otf
+```
 
 ### 自更新
 
