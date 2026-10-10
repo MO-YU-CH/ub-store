@@ -378,11 +378,12 @@ class TestListAndPaging(BaseCase):
             (lambda u, m, b: "chart/filter" in u, h_anon),
         ])
         sess = S.BrowseSession(c, mode=4, uid=1, key="SK")
-        new1, more1 = sess.next_batch()
+        # 显式 pages=1，隔离"单页"语义（默认已是 2 页，见下一个用例）
+        new1, more1 = sess.next_batch(pages=1)
         self.assertTrue(more1)                              # 商店还有下一页
         self.assertEqual(len([x for x in new1 if x["__src"] == "store"]), 1)
         self.assertEqual(len([x for x in new1 if x["__src"] == "anon"]), 1)   # 去重后只剩 1（4 次同页）
-        new2, more2 = sess.next_batch()
+        new2, more2 = sess.next_batch(pages=1)
         self.assertFalse(more2)                             # 两来源都取尽（商店 hasMore=False、公开页空）
         titles = [x["title"] for x in new1 + new2]
         self.assertEqual(sorted(titles), ["A1", "S1", "S2"])
@@ -390,6 +391,42 @@ class TestListAndPaging(BaseCase):
         # 第二批必须把第一批的 next 游标当 from 传回去（游标，不是偏移量）
         self.assertTrue(any("from=900" in x["url"] for x in c.calls))
         self.assertFalse(any("from=30" in x["url"] for x in c.calls))
+
+    def test_next_batch_pulls_two_pages_by_default(self):
+        """每次 next_batch() 默认拉 2 页（用户要求：加快翻页）。"""
+        self.assertEqual(S.BrowseSession.PAGES_PER_BATCH, 2)
+
+        def anon_resp(url):
+            pg = 1 if "page=1" in url else 0
+            st = int(url.split("status=")[-1].split("&")[0])
+            # title 里带上 status，避免不同 status 的数据被 _key_of 误判成重复
+            return {"code": 0, "data": {"total": 99, "list": [
+                {"id": 1000 + pg * 100 + st * 10 + k,
+                 "title": "P%d-S%d-%d" % (pg, st, k),
+                 "artist": "A", "mode": 4} for k in range(2)]}}
+
+        c = MockTransport([
+            (lambda u, m, b: "chart/filter" in u,
+             lambda u, m, b: json.loads(json.dumps(anon_resp(u)))),
+        ])
+        sess = S.BrowseSession(c, mode=4, include_store=False)
+        new, _more = sess.next_batch()
+        # 2 页 × 4 个 status × 2 条 = 16 条
+        self.assertEqual(len(new), 16)
+        # 页码应推进到 2（说明确实拉了两页）
+        self.assertEqual(set(sess._anon_page.values()), {2})
+
+    def test_next_batch_pages_one(self):
+        """pages=1 时只拉一页（首屏用，避免等太久）。"""
+        c = MockTransport([
+            (lambda u, m, b: "chart/filter" in u,
+             lambda u, m, b: json.loads(json.dumps(
+                 {"code": 0, "data": {"total": 9, "list": [
+                     {"id": 7001, "title": "One", "artist": "A", "mode": 4}]}}))),
+        ])
+        sess = S.BrowseSession(c, mode=4, include_store=False)
+        new, _more = sess.next_batch(pages=1)
+        self.assertEqual(set(sess._anon_page.values()), {1})
 
     def test_browse_session_pad_only_and_dedupe_across_sources(self):
         """pad_only 过滤多模式；跨来源同曲只留一条。"""

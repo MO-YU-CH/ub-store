@@ -461,6 +461,8 @@ class StoreGUI:
         self._loading = False
         #: 等待数据到位后再切到的目标页（拉取失败/到底时不会跳错页）
         self._pending_page = None
+        #: 是否成功拉过至少一批（否则首屏空列表只是"还没拉到"，不是"没有曲"）
+        self._ever_loaded = False
         self.selected_row = None
         # 已下载 / 已装
         self.downloaded_items = []
@@ -1310,6 +1312,7 @@ class StoreGUI:
         self.has_more = True
         self._loading = False
         self._pending_page = None
+        self._ever_loaded = False
         self._render_page()
         self._load_batch(first=True)
 
@@ -1372,10 +1375,13 @@ class StoreGUI:
             if self.session is None:
                 self.session = S.BrowseSession(
                     self.client, mode=S.MODE_PAD, pad_only=pad_only)
-            return self.session.next_batch()
+            # 首次只拉 1 页：每页要 4 个公开请求（限速 ~1 req/s），拉 2 页要
+            # 近 40 秒才出内容。先快速把首屏铺出来，之后每批拉 2 页保证翻页快。
+            return self.session.next_batch(pages=1 if first else None)
 
         def done(res):
             self._loading = False
+            self._ever_loaded = True
             new, more = res
             self.all_rows.extend(new)
             self.has_more = more
@@ -1392,6 +1398,7 @@ class StoreGUI:
 
         def err(e):
             self._loading = False
+            self._ever_loaded = True      # 失败也算"尝试过"，否则会一直显示"拉取中"
             self._pending_page = None
             self.on_error(e, "拉取列表失败")
 
@@ -1402,11 +1409,23 @@ class StoreGUI:
         maxp = max(1, (len(arr) + self.page_size - 1) // self.page_size)
         self.page = max(0, min(self.page, maxp - 1))
         self.rows = arr[self.page * self.page_size:(self.page + 1) * self.page_size]
+        # 空列表有两种含义，文案要分开：
+        #   · 还没拉到过任何一批 → 是"正在拉取"，不是"没有曲"
+        #   · 拉过但确实是空的 / 过滤后为空 → 才是"没有匹配的谱面"
+        if not arr:
+            if not self._ever_loaded:
+                empty = "正在拉取谱面列表，请稍候…（首次约几秒）"
+            elif self.var_filter.get().strip():
+                empty = "没有匹配「%s」的谱面。" % self.var_filter.get().strip()
+            else:
+                empty = "没有拉到谱面。可点【刷新】重试。"
+        else:
+            empty = ""
         self.browse_grid.set_items(
             self.rows,
             badge_of=self._browse_badge,
             cover_of=self._browse_cover_spec,
-            empty_text="没有匹配的谱面。")
+            empty_text=empty)
         self.var_page.set("%d / %d（已加载 %d 条%s）"
                           % (self.page + 1, maxp, len(arr),
                              "" if self.has_more else "，到底"))

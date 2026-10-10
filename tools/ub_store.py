@@ -302,8 +302,34 @@ class BrowseSession:
     def has_more(self):
         return bool(self._store_more or self._anon_more)
 
-    def next_batch(self):
-        """拉下一批，返回 (新增条目列表, 是否还有更多)。"""
+    #: 每次 next_batch() 默认拉几「页」。
+    #: 用户要求 2 —— 一次多拉一页，翻页时更少触发"再拉一批"的等待。
+    PAGES_PER_BATCH = 2
+
+    def next_batch(self, pages=None):
+        """拉下一批，返回 (新增条目列表, 是否还有更多)。
+
+        `pages` 默认取 `PAGES_PER_BATCH`（2），即一次拉两页：
+        商店 2 页 + 每个 status 各 2 页。这样连续翻页时基本不用等网络。
+        """
+        pages = self.PAGES_PER_BATCH if pages is None else max(1, int(pages))
+        new = []
+        for _ in range(pages):
+            if not self.has_more():
+                break
+            before = len(new)
+            new.extend(self._next_one_page())
+            # 这一页一条新的都没拿到，且已到底 → 再拉也是白费
+            if len(new) == before and not self.has_more():
+                break
+        self.batches += 1
+        return new, self.has_more()
+
+    def _next_one_page(self):
+        """拉一「页」：商店 1 页（游标）+ 公开各 status 1 页。返回新增条目。
+
+        合并后按 `_key_of`（title|artist）去重，只回新增的。
+        """
         new = []
         # --- 商店：1 页（游标） ---
         if self.include_store and self._store_more:
@@ -357,8 +383,7 @@ class BrowseSession:
                     new.append(it)
                     self.parts["anon"] += 1
             self._anon_more = got_any
-        self.batches += 1
-        return new, self.has_more()
+        return new
 
 
 # ---------------------------------------------------------------------------

@@ -107,7 +107,7 @@ class FakeSession:
         self.scanned = len(self.rows)
         self.batches = 0
 
-    def next_batch(self):
+    def next_batch(self, pages=None):
         self.batches += 1
         if self.batches == 1:
             return (list(self.rows), False)
@@ -688,6 +688,46 @@ class TestBatchOperations(GUIBase):
         self.assertEqual(self.app.client.download_calls if hasattr(self.app.client, "download_calls") else [], [])
 
 
+class TestBrowseEmptyState(GUIBase):
+    """首屏还没拉到数据时，应提示"拉取中"而不是"没有曲"。"""
+
+    def test_shows_loading_before_first_batch(self):
+        app = self.make_app()
+        app.page_size = 30
+        app.page = 0
+        app.all_rows = []
+        app.filtered_all = []
+        app._ever_loaded = False          # 还没拉到过任何一批
+        app._render_page()
+        text = app.browse_grid.empty_var.get()
+        self.assertIn("拉取", text, "首屏空列表应提示正在拉取，实际：%r" % text)
+
+    def test_shows_no_result_after_loaded_but_empty(self):
+        app = self.make_app()
+        app.page_size = 30
+        app.page = 0
+        app.all_rows = []
+        app.filtered_all = []
+        app._ever_loaded = True           # 拉过了，确实没数据
+        app._render_page()
+        text = app.browse_grid.empty_var.get()
+        self.assertNotIn("拉取", text)
+        self.assertTrue(text, "应给出空结果提示")
+        self.assertIn("没有", text)
+
+    def test_mentions_keyword_when_filtered_empty(self):
+        app = self.make_app()
+        app.page_size = 30
+        app.page = 0
+        app.all_rows = [{"id": 1, "title": "AAA"}]
+        app.filtered_all = []             # 过滤后为空
+        app._ever_loaded = True
+        app.var_filter.set("zzz")
+        app._render_page()
+        text = app.browse_grid.empty_var.get()
+        self.assertIn("zzz", text, "过滤后为空应带上关键词，实际：%r" % text)
+
+
 class TestPagingNoDuplicates(GUIBase):
     """翻页去重 / 防重入（用户反馈"翻页出现重复的歌"）。"""
 
@@ -704,7 +744,7 @@ class TestPagingNoDuplicates(GUIBase):
         class SlowSess:
             parts = {"store": 0, "anon": 0}
 
-            def next_batch(self):
+            def next_batch(self, pages=None):
                 calls["n"] += 1
                 time.sleep(0.2)
                 return ([{"id": 1, "title": "X"}], True)
@@ -728,7 +768,7 @@ class TestPagingNoDuplicates(GUIBase):
             def __init__(self):
                 self.k = 0
 
-            def next_batch(self):
+            def next_batch(self, pages=None):
                 base = self.k * 40
                 self.k += 1
                 return ([{"id": base + i, "title": "T%d" % (base + i)}
@@ -770,7 +810,7 @@ class TestPagingNoDuplicates(GUIBase):
         class Noop:
             parts = {"store": 0, "anon": 0}
 
-            def next_batch(self):
+            def next_batch(self, pages=None):
                 time.sleep(0.15)
                 return ([], False)
         app.session = Noop()
