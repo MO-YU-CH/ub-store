@@ -100,6 +100,12 @@ def _get_json(url, proxy=None, timeout=20):
     return json.loads(raw.decode("utf-8"))
 
 
+def _get_text(url, proxy=None, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with _opener(proxy).open(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
 class UpdateError(Exception):
     pass
 
@@ -107,16 +113,12 @@ class UpdateError(Exception):
 # ---------------------------------------------------------------------------
 # 检查
 # ---------------------------------------------------------------------------
-def check(repo=GITHUB_REPO, current=APP_VERSION, proxy=None, timeout=20,
-          arch=None, include_prerelease=False):
-    """查询最新 Release，返回 dict：
-
-        {ok, current, latest, newer, notes, html_url, asset_name, asset_url, error}
-    """
+def _check_release(repo, current, proxy, timeout, arch):
+    """走 GitHub Releases API。"""
     api = "https://api.github.com/repos/%s/releases/latest" % repo
     res = {"ok": False, "current": current, "latest": None, "newer": False,
            "notes": "", "html_url": "", "asset_name": None, "asset_url": None,
-           "error": None}
+           "error": None, "source": "release"}
     try:
         data = _get_json(api, proxy=proxy, timeout=timeout)
     except urllib.error.HTTPError as ex:
@@ -136,14 +138,67 @@ def check(repo=GITHUB_REPO, current=APP_VERSION, proxy=None, timeout=20,
     res["ok"] = True
 
     want = ASSET_NAMES.get(pick_asset_key(arch), ASSET_NAMES["win32"])
-    assets = data.get("assets") or []
-    for a in assets:
+    for a in (data.get("assets") or []):
         if (a.get("name") or "").lower() == want.lower():
             res["asset_name"] = a.get("name")
             res["asset_url"] = a.get("browser_download_url")
             break
     if res["newer"] and not res["asset_url"]:
         res["error"] = "新版 Release 里没有找到资产 %s" % want
+    return res
+
+
+def _check_repo_files(repo, current, proxy, timeout, arch):
+    """回退方案：直接读仓库里的 ``VERSION`` 与 ``release/<asset>``。
+
+    这样即使还没来得及发 Release，只要把新版 exe 提交进 ``release/`` 目录
+    并更新 ``VERSION``，自更新就能工作。
+    """
+    raw = "https://raw.githubusercontent.com/%s/HEAD" % repo
+    res = {"ok": False, "current": current, "latest": None, "newer": False,
+           "notes": "", "html_url": "https://github.com/%s" % repo,
+           "asset_name": None, "asset_url": None, "error": None, "source": "repo"}
+    try:
+        latest = _get_text("%s/VERSION" % raw, proxy=proxy, timeout=timeout).strip()
+    except Exception as ex:                                  # noqa: BLE001
+        res["error"] = "%s: %s" % (type(ex).__name__, ex)
+        return res
+    if not latest:
+        res["error"] = "仓库里的 VERSION 是空的"
+        return res
+    want = ASSET_NAMES.get(pick_asset_key(arch), ASSET_NAMES["win32"])
+    res["latest"] = latest
+    res["newer"] = is_newer(latest, current)
+    res["ok"] = True
+    res["asset_name"] = want
+    res["asset_url"] = "%s/release/%s" % (raw, want)
+    res["notes"] = "（来自仓库 VERSION，未发布 Release）"
+    if res["newer"]:
+        # 顺手确认产物真的存在，免得下载时才失败
+        try:
+            req = urllib.request.Request(res["asset_url"], method="HEAD",
+                                         headers={"User-Agent": _UA})
+            _opener(proxy).open(req, timeout=timeout).close()
+        except Exception as ex:                              # noqa: BLE001
+            res["error"] = "仓库里找不到 %s（%s）" % (want, type(ex).__name__)
+    return res
+
+
+def check(repo=GITHUB_REPO, current=APP_VERSION, proxy=None, timeout=20,
+          arch=None, include_prerelease=False):
+    """查询最新版本：**优先 GitHub Releases，查不到则回退到仓库内文件**。返回 dict：
+
+        {ok, current, latest, newer, notes, html_url,
+         asset_name, asset_url, error, source}
+    """
+    res = _check_release(repo, current, proxy, timeout, arch)
+    if res["ok"]:
+        return res
+    alt = _check_repo_files(repo, current, proxy, timeout, arch)
+    if alt["ok"]:
+        return alt
+    # 两边都失败：把两个原因都带上，便于排查
+    res["error"] = "%s / %s" % (res.get("error"), alt.get("error"))
     return res
 
 
