@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import collections
 import inspect
 import json
 import os
@@ -685,6 +686,100 @@ class TestBatchOperations(GUIBase):
                             if "登录" in (t or "") or "需要登录" in (t or ""))
                         or True)          # 走 askyesno=False 分支即可（已打桩为 False）
         self.assertEqual(self.app.client.download_calls if hasattr(self.app.client, "download_calls") else [], [])
+
+
+class TestPagingNoDuplicates(GUIBase):
+    """翻页去重 / 防重入（用户反馈"翻页出现重复的歌"）。"""
+
+    def test_no_reentrant_load(self):
+        """快速连点「下一页」不应并发触发多次拉取。
+
+        Async.run 每次都会新开工作线程；如果 _load_batch 不防重入，
+        两次 next_batch() 会并发操作 BrowseSession 的 _seen/_anon_page，
+        导致条目重复。
+        """
+        app = self.make_app()
+        calls = {"n": 0}
+
+        class SlowSess:
+            parts = {"store": 0, "anon": 0}
+
+            def next_batch(self):
+                calls["n"] += 1
+                time.sleep(0.2)
+                return ([{"id": 1, "title": "X"}], True)
+
+        app.session = SlowSess()
+        app._loading = False
+        for _ in range(5):                  # 模拟狂点
+            app._load_batch()
+            time.sleep(0.005)
+        pump(self.root, 40, 0.03)
+        self.assertEqual(calls["n"], 1,
+                         "防重入失效：next_batch 被并发调用了 %d 次" % calls["n"])
+
+    def test_paging_never_repeats_items(self):
+        """顺序翻页时，各页显示的条目不应重复。"""
+        app = self.make_app()
+
+        class Sess:
+            parts = {"store": 0, "anon": 0}
+
+            def __init__(self):
+                self.k = 0
+
+            def next_batch(self):
+                base = self.k * 40
+                self.k += 1
+                return ([{"id": base + i, "title": "T%d" % (base + i)}
+                         for i in range(40)], True)
+
+        app.session = Sess()
+        app.page_size = 30
+        app.page = 0
+        app.all_rows = []
+        app.filtered_all = []
+        app.has_more = True
+        app._loading = False
+        app._pending_page = None
+        new, more = app.session.next_batch()
+        app.all_rows.extend(new)
+        app.apply_filter(reset_page=False)
+
+        seen = []
+        for _ in range(6):
+            app.change_page(1)
+            pump(self.root, 20, 0.03)
+            seen += [r["id"] for r in app.rows]
+        dupes = [i for i, n in collections.Counter(seen).items() if n > 1]
+        self.assertEqual(dupes, [], "翻页出现重复条目：%s" % dupes[:10])
+
+    def test_page_not_advanced_when_load_pending(self):
+        """需要拉数据时不能"乐观"先跳页（拉取失败会错位）。"""
+        app = self.make_app()
+        app.page_size = 30
+        app.page = 0
+        # 40 条 → 翻到第 2 页时 (1+1)*30=60 > 40，才会触发"再拉一批"
+        # （若给 60 条则 60 > 60 不成立，会走本地翻页，测不到这条路径）
+        app.all_rows = [{"id": i, "title": str(i)} for i in range(40)]
+        app.filtered_all = list(app.all_rows)
+        app.has_more = True
+        app._loading = False
+        app._pending_page = None
+
+        class Noop:
+            parts = {"store": 0, "anon": 0}
+
+            def next_batch(self):
+                time.sleep(0.15)
+                return ([], False)
+        app.session = Noop()
+        app.change_page(1)                  # 触发异步拉取
+        self.assertEqual(app.page, 0, "拉取还没回来就不该改页码")
+        self.assertEqual(app._pending_page, 1)
+        pump(self.root, 40, 0.03)
+        # 拉回后页码才切过去
+        self.assertEqual(app.page, 1)
 
 
 class TestNoBusinessLogicInGUI(unittest.TestCase):

@@ -457,6 +457,10 @@ class StoreGUI:
         self.source_label = ""
         self.session = None          # BrowseSession：增量拉取会话
         self.has_more = True
+        #: 正在拉取中（防重入：Async 每次新开线程，快速连点会并发拉取 → 条目重复）
+        self._loading = False
+        #: 等待数据到位后再切到的目标页（拉取失败/到底时不会跳错页）
+        self._pending_page = None
         self.selected_row = None
         # 已下载 / 已装
         self.downloaded_items = []
@@ -1221,15 +1225,23 @@ class StoreGUI:
         self.filtered_all = []
         self.session = None
         self.has_more = True
+        self._loading = False
+        self._pending_page = None
+        self._render_page()
         self._load_batch(first=True)
 
     def change_page(self, delta):
         npg = self.page + delta
         if npg < 0:
             return
-        # 目标页还没加载到 → 再拉一批（异步）；否则本地翻页
+        if self._loading:
+            self.set_status("正在拉取中，请稍候再翻页…")
+            return
+        # 目标页还没加载到 → 再拉一批。**不要先改 page**：万一拉取失败或到底了，
+        # 页码已经跳走会让界面显示错位（看起来像"重复/跳页"）。
+        # 记到 _pending_page，等 done() 里数据到位后再切页。
         if (npg + 1) * self.page_size > len(self.filtered_all) and self.has_more:
-            self.page = npg
+            self._pending_page = npg
             self._load_batch()
             return
         maxp = max(1, (len(self.filtered_all) + self.page_size - 1) // self.page_size)
@@ -1256,7 +1268,14 @@ class StoreGUI:
 
         不一次拉全库：公开接口 30 条/页 + 限速 ~1 req/s，且 `total` 字段是假的，
         所以按需增量拉取 —— 打开界面只发 5 个请求（商店 1 页 + 公开 4×1 页）。
+
+        ⚠️ **必须防重入**：Async.run 每次都会新开工作线程，用户快速连点「下一页」
+        会并发调用 `session.next_batch()`，而 BrowseSession 的 `_seen` / `_anon_page`
+        是普通属性、没有并发保护 —— 两次拉取互相踩就会出现**重复条目**。
         """
+        if self._loading:
+            self.set_status("正在拉取中，请稍候…")
+            return
         if not first and not self.has_more:
             self.set_status("已经到底了：公开接口没有更多条目")
             return
@@ -1264,6 +1283,7 @@ class StoreGUI:
         # 会与主线程的 Tk 事件循环争 Tcl 锁（主线程紧密 update 时直接死锁）。
         pad_only = bool(self.var_pad_only.get())
         self.set_status("正在拉取一批（商店 1 页 + 公开 4×1 页）…")
+        self._loading = True
 
         def work():
             if self.session is None:
@@ -1272,6 +1292,7 @@ class StoreGUI:
             return self.session.next_batch()
 
         def done(res):
+            self._loading = False
             new, more = res
             self.all_rows.extend(new)
             self.has_more = more
@@ -1279,10 +1300,19 @@ class StoreGUI:
             self.source_label = "商店 %d + 公开 %d（已加载 %d%s）" % (
                 p.get("store", 0), p.get("anon", 0), len(self.all_rows),
                 "" if more else "，已到底")
+            # 若这次拉取是为了跳到更后面的页，等数据到位后再改页码
+            if self._pending_page is not None:
+                self.page = self._pending_page
+                self._pending_page = None
             self.apply_filter(reset_page=False)
             self.set_status("本批 +%d 条 → %s" % (len(new), self.source_label))
 
-        self.async_.run(work, done, lambda e: self.on_error(e, "拉取列表失败"))
+        def err(e):
+            self._loading = False
+            self._pending_page = None
+            self.on_error(e, "拉取列表失败")
+
+        self.async_.run(work, done, err)
 
     def _render_page(self):
         arr = self.filtered_all
