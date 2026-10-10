@@ -2029,6 +2029,7 @@ class StoreGUI:
             marks = scan.get("deletion_markers") or {}
             n_mark = sum(len(v) for v in marks.values())
             ids = scan.get("affected_song_ids") or []
+            dlls = scan.get("new_dlls") or []
             msg = ("更新包：%s\n\n"
                    "条目总数：%d\n"
                    "  普通文件：%d\n"
@@ -2037,6 +2038,11 @@ class StoreGUI:
                    % (os.path.basename(pack_path), scan.get("entries", 0),
                       scan.get("normal_files", 0), scan.get("charts", 0),
                       scan.get("textures", 0)))
+            if dlls:
+                msg += ("\n⚠ 含官方新版 DLL %d 个：\n%s\n"
+                        "  应用后 DLL 补丁会失效（偏移变了），稍后会问你是否自动重新打补丁。\n"
+                        % (len(dlls),
+                           "\n".join("    · %s" % d["rel"] for d in dlls[:4])))
             if n_mark:
                 msg += ("\n⚠ 含删除标记 %d 个（涉及 %d 首曲目 id）\n"
                         "  应用时会先备份；是否同时执行删除？\n"
@@ -2066,11 +2072,17 @@ class StoreGUI:
                 n_apply = len(plan.get("apply") or [])
                 n_skip = len(plan.get("skip_marker") or [])
                 self.set_status("更新包应用完成（写入 %d 项）" % n_apply)
+                extra = ""
+                if dlls:
+                    extra = "\n\n⚠ 包含新版 DLL：%s" % "、".join(
+                        d["rel"] for d in dlls[:3])
                 messagebox.showinfo(
                     "更新包已应用",
                     "《%s》应用完成。\n\n写入 %d 项\n跳过删除标记 %d 项\n\n"
-                    "备份在 ub_updater 工作目录的 backup 下，可回退。"
-                    % (os.path.basename(pack_path), n_apply, n_skip))
+                    "备份在 ub_updater 工作目录的 backup 下，可回退。%s"
+                    % (os.path.basename(pack_path), n_apply, n_skip, extra))
+                if dlls:
+                    self._ask_new_dll(game, dlls)
 
             def err2(e):
                 messagebox.showerror("应用更新包失败", str(e))
@@ -2080,6 +2092,61 @@ class StoreGUI:
 
         self.async_.run(work, done,
                         lambda e: messagebox.showerror("扫描更新包失败", str(e)))
+
+    def _ask_new_dll(self, game, dlls):
+        """官方新版 DLL 的后续处理：装成 jb_org.dll 并**自动重新打补丁**。"""
+        rel = dlls[0]["rel"]
+        src = os.path.join(game, rel.replace("/", os.sep))
+        if not os.path.exists(src):
+            messagebox.showwarning(
+                "找不到新版 DLL",
+                "应用后没能找到 %s。\n请手工按包内《应用说明.txt》处理。" % src)
+            return
+        if not messagebox.askyesno(
+                "发现官方新版 DLL",
+                "包里带了官方新版 %s。\n\n"
+                "它已释放到：\n  %s\n\n"
+                "游戏实际加载的是 contents\\jb_org.dll，而这个新版 DLL 是官方原版，\n"
+                "**DLL 补丁（跳过教程 / 计时器冻结等）会失效**（官方重编译后偏移全变）。\n\n"
+                "现在自动处理吗？\n"
+                "  1) 备份现有 jb_org.dll\n"
+                "  2) 用新版覆盖\n"
+                "  3) 用特征码重新定位 4 个补丁站点并打补丁\n\n"
+                "（只在这些站点**全部唯一命中**时才会写出补丁；\n"
+                "  失败则保留官方原版并告诉你，不会乱打）\n\n"
+                "⚠️ 不会碰 contents\\jubeat.dll（omnimix 挂载模块）。" % (rel, src)):
+            self.set_status("已跳过新版 DLL 的补丁处理")
+            return
+        self.set_status("正在处理新版 DLL（备份 + 打补丁）…")
+
+        def work():
+            return UU.apply_new_dll(src, game, target_rel="jb_org.dll", patch=True)
+
+        def done(res):
+            if res.get("error"):
+                self.set_status("DLL 处理未完成：%s" % res["error"])
+                messagebox.showwarning(
+                    "DLL 处理未完成",
+                    "%s\n\n目标：%s\n备份：%s\n\n"
+                    "建议按包内《应用说明.txt》人工核对。"
+                    % (res["error"], res.get("target"), res.get("backup")))
+                return
+            self.set_status("DLL 已更新并打好补丁 ✅")
+            messagebox.showinfo(
+                "DLL 处理完成",
+                "已更新 %s 并重新打好补丁。\n\n"
+                "  补丁站点：%s%s\n"
+                "  备份：%s"
+                % (os.path.basename(res["target"] or ""),
+                   res.get("sites"),
+                   "（原本已是补丁版，无需重打）" if res.get("already") else "",
+                   res.get("backup") or "（无，原文件不存在）"))
+
+        def err(e):
+            self.set_status("DLL 处理失败：%s" % e)
+            messagebox.showerror("DLL 处理失败", str(e))
+
+        self.async_.run(work, done, err)
 
     # ---- 批量安装谱面 ----
     def _install_units(self, units, chart_paths):

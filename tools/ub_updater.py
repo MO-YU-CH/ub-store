@@ -148,6 +148,9 @@ def do_scan(pack_path, as_json=False):
             'tex_stub(1B贴图桩)': [(a, b) for a, b in stubs['tex_stub']],
         },
         'affected_song_ids': sorted({i for k in stubs for a, _ in stubs[k] for i in song_ids_of(a)}),
+        # ★ 包里的 modules/*.dll = 官方新版真本体。直接覆盖会让 DLL 补丁失效，
+        #   必须重新用特征码定位打补丁（GUI 会就此单独提示）。
+        'new_dlls': [{"rel": a, "size": b} for a, b in list_pack_dlls(pack_path)],
     }
     if as_json:
         # ★ JSON 强制 UTF-8：stdout 已被改成控制台编码(GBK)，重定向给脚本消费会乱码
@@ -542,6 +545,92 @@ def detect_duplicates(game_dir, pack_src):
         if rd in byrd:
             warns.append('新曲 %d 读音「%s」与已有曲 %s 重复（同曲多 id）' % (i, rd, byrd[rd]))
     return warns
+
+
+def list_pack_dlls(pack_path):
+    """列出更新包里的 modules/*.dll（这些是**官方新版真本体**，不是可直接用的模块）。
+
+    返回 [(rel, size), ...]
+    """
+    out = []
+    for rel, size in read_pack(pack_path):
+        low = rel.replace('\\', '/').lower()
+        if low.startswith('modules/') and low.endswith('.dll'):
+            out.append((rel, size))
+    return out
+
+
+def apply_new_dll(dll_new, game_dir, target_rel='jb_org.dll',
+                  backup_root=None, patch=True):
+    """把官方新版 DLL 装到游戏里并**重新打补丁**。
+
+    背景：`modules/jubeat.dll` 是官方真游戏本体，而游戏真正加载的是
+    `contents/jb_org.dll`（`contents/jubeat.dll` 是 omnimix 挂载模块，**不要动**）。
+    官方每次更新都会重编译 DLL，**旧的补丁偏移必然失效**，必须用特征码重定位。
+
+    步骤：
+      1. 备份现有目标（若存在）
+      2. 把 dll_new 复制成 <game>/<target_rel>
+      3. 用 ub_patcher 定位 4 个站点并打补丁（只有全部唯一命中才写出）
+
+    ⚠️ 只做"复制 + 打补丁"，**绝不碰 `contents/jubeat.dll`**（挂载模块）。
+    返回 {target, backup, patched, sites, error}
+    """
+    res = {"target": None, "backup": None, "patched": False,
+           "sites": None, "error": None}
+    if not os.path.exists(dll_new):
+        res["error"] = "新版 DLL 不存在：%s" % dll_new
+        return res
+    tgt = os.path.join(game_dir, target_rel)
+    res["target"] = tgt
+    # 1) 备份
+    if os.path.exists(tgt):
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        root = backup_root or os.path.join(os.path.dirname(tgt), 'jb_backup')
+        os.makedirs(root, exist_ok=True)
+        bak = os.path.join(root, '%s.bak_%s' % (os.path.basename(tgt), stamp))
+        try:
+            shutil.copy2(tgt, bak)
+            res["backup"] = bak
+        except OSError as ex:
+            res["error"] = "备份失败：%s" % ex
+            return res
+    # 2) 复制为新本体
+    try:
+        shutil.copy2(dll_new, tgt)
+    except OSError as ex:
+        res["error"] = "写入失败：%s" % ex
+        return res
+    # 3) 打补丁
+    if patch:
+        try:
+            import ub_patcher as UP
+            data = open(tgt, 'rb').read()
+            res_list = UP.locate_sites(data)        # [{'site','state','offset',...}, ...]
+            states = [x.get('state') for x in res_list]
+            res["sites"] = states
+            good = ('PATCHABLE', 'PATCHED')
+            if not states or any(s not in good for s in states):
+                bad = [x['site']['name'] if isinstance(x.get('site'), dict)
+                       else '?' for x in res_list if x.get('state') not in good]
+                res["error"] = ("补丁站点未能全部唯一命中（异常站点：%s，全部状态：%s）——"
+                                "新版 DLL 结构可能变了，需人工分析，**暂未打补丁**。"
+                                % (bad or '无', states))
+                return res
+            if all(s == 'PATCHED' for s in states):
+                res["patched"] = True               # 已经是补丁版，无需再打
+                res["already"] = True
+                return res
+            out = tgt + '.patched'
+            rc = UP.cmd_patch(tgt, out)
+            if rc not in (0, None) or not os.path.exists(out):
+                res["error"] = "打补丁被拒绝（ub_patcher 退出码 %s）" % rc
+                return res
+            os.replace(out, tgt)
+            res["patched"] = True
+        except Exception as ex:                              # noqa: BLE001
+            res["error"] = "打补丁失败：%s" % ex
+    return res
 
 
 def verify_dll(dll_path, patch_too=False):
