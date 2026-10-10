@@ -226,6 +226,85 @@ def check_id_free(game: str, music_id: int):
     return (len(reasons) == 0), reasons
 
 
+# ---------------------------------------------------------------------------
+# 孤儿条目：曲表里还在，但文件已经不在了
+# ---------------------------------------------------------------------------
+def _orphan_missing(game: str, music_id: int):
+    """返回该 id 缺失的关键文件列表（空 = 完好）。
+
+    ⚠️ 必须**同时看 overlay 和官方基座**：官方曲目的文件在 `data/...`，
+    自制的在 `data_mods/omnimix/...`。只看 overlay 会把官方曲目全判成孤儿。
+    """
+    p = game_paths(game)
+    gd = group_dir(music_id)
+    miss = []
+    ifs_cands = [os.path.join(p["ifs_overlay"], gd, "%d_msc.ifs" % music_id),
+                 os.path.join(p["ifs_base"], gd, "%d_msc.ifs" % music_id)]
+    if not any(os.path.exists(c) for c in ifs_cands):
+        miss.append(ifs_cands[0].replace("\\", "/").replace(
+            os.path.abspath(game).replace("\\", "/"), "<game>"))
+    for name in ("tex_l44_bnr_big_id%d.bin" % music_id,
+                 "mdl_l44_bnr_big_id%d.bin" % music_id):
+        if not any(os.path.exists(os.path.join(b, name))
+                   for b in (p["model_overlay"], p["model_base"])):
+            miss.append(name)
+    return miss
+
+
+def find_orphans(game: str) -> list:
+    """找出曲表里的**自制谱**条目中、关键文件已缺失的（孤儿）。
+
+    典型成因：用户“删除”了本地下载文件（旧版只清 cache），
+    但曲表条目没被卸载，且 state_<id>.json 也可能一起没了 → 卸载按钮点不了。
+    游戏启动时会去读 `_msc.ifs` / 贴图，读不到就报
+    `W:imagefs: cannot open ...(80070002)`、`W:aep: texname error [...]`，
+    甚至弹 `SSD READ ERROR 9-1502-0000`。
+
+    只检查**自制谱 id 段**（>= CUSTOM_SEGMENT*1000000），绝不碰官方条目。
+    """
+    txt = open(music_table_path(game), encoding="utf-8", errors="replace").read()
+    out = []
+    for b in music_blocks(txt):
+        m = MID_RE.search(b)
+        if not m:
+            continue
+        mid = int(m.group(1))
+        # 只认**真正的自制谱 id 区**：段内偏移 >= OFFICIAL_SEQ_LIMIT。
+        # 官方 90000001~90001035 也落在 90 段，用偏移区分才不会把它们当孤儿。
+        if (mid // 1000000) != CUSTOM_SEGMENT or (mid % 1000000) < OFFICIAL_SEQ_LIMIT:
+            continue
+        miss = _orphan_missing(game, mid)
+        if miss:
+            t = re.search(r"<name_string __type=\"str\">([^<]*)</name_string>", b)
+            out.append({"music_id": mid, "missing": miss,
+                        "name_string": t.group(1) if t else ""})
+    return out
+
+
+def cleanup_orphan(game: str, music_id: int, backup=True) -> dict:
+    """把孤儿的曲表条目摘掉（只动 overlay 曲表，并重排块 id / data_num）。
+
+    ⚠️ 只应用于 `find_orphans()` 认出来的条目——它会先复核文件确实缺失，
+    避免误删一个文件完好的正常曲目。
+    """
+    miss = _orphan_missing(game, music_id)
+    if not miss:
+        raise ValueError("music_id=%d 的文件其实是完整的，拒绝清理" % music_id)
+    mt = music_table_path(game)
+    txt = open(mt, encoding="utf-8", errors="replace").read()
+    out, info = remove_music_record(txt, music_id)
+    if backup:
+        stamp = __import__("time").strftime("%Y%m%d_%H%M%S")
+        bak = "%s.bak_orphan_%s" % (mt, stamp)
+        shutil.copy2(mt, bak)
+        info["backup"] = bak
+    with open(mt, "w", encoding="utf-8", newline="") as f:
+        f.write(out)
+    info["music_id"] = music_id
+    info["missing"] = miss
+    return info
+
+
 def is_official_style_id(music_id: int) -> bool:
     """判断这个 id 是否落在官方的"编号规律区"（会被官方将来占用）。
 
@@ -865,9 +944,13 @@ def register_group_tex(game, music_id: int, title: str, jacket=None, artist=None
             tdxt = T.encode_image_to_tdxt(img, fmt=fmt, hf3=hf3, fmtflags=fmtflags)
         else:
             wide = entry.startswith("IDX_ID")
+            # 显式传字体：优先用**游戏自己的日文字体**，缺失时回退到打包自带的
+            # 思源黑体。不传的话会落到硬编码的本机路径 → 实机上找不到 →
+            # 回退 arial → 中文 marker「[自制]」被画成白框。
             img = T.make_title_png(title, slot=("wide" if wide else "mini"),
                                    marker=marker,
-                                   artist=(artist if wide else None))
+                                   artist=(artist if wide else None),
+                                   font=T.game_font(game))
             tdxt = T.encode_image_to_tdxt(img, fmt=fmt, hf3=hf3, fmtflags=fmtflags)
             src = "title:%s(%dx%d)" % (title, w, h)
 

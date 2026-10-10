@@ -1691,6 +1691,33 @@ def verify_game(game):
 
 
 # ---------------------------------------------------------------------------
+# 孤儿条目（曲表里有、文件却没了）—— 通常由"只删本地文件没卸载"造成
+# ---------------------------------------------------------------------------
+def find_orphans(game) -> list:
+    N = _newsong()
+    return N.find_orphans(game)
+
+
+def cleanup_orphans(game, music_ids=None) -> dict:
+    """清理孤儿曲表条目。music_ids 为 None 时先自己扫一遍。
+
+    返回 {removed: [(id, 备份路径)], failed: [(id, 原因)], orphans: [...]}
+    """
+    N = _newsong()
+    if music_ids is None:
+        music_ids = [o["music_id"] for o in N.find_orphans(game)]
+    removed, failed = [], []
+    for mid in music_ids:
+        try:
+            info = N.cleanup_orphan(game, mid, backup=True)
+            removed.append((mid, info.get("backup")))
+        except Exception as ex:                              # noqa: BLE001
+            failed.append((mid, str(ex)))
+    return {"removed": removed, "failed": failed,
+            "orphans": N.find_orphans(game)}
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def _print_json(o):

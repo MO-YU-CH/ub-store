@@ -1062,22 +1062,62 @@ def roundtrip_file(path, fmt=None, png_out=None) -> dict:
 #                           df-chubutomarugothic-w7.ttc@15 次之(0.60)。
 #   真实 IDX_ID(324x40): 两行——曲名行 y∈[4..19]（高≈16px），艺术家行 y∈[25..35]（高≈11px），
 #                         起笔 x≈4。-> 曲名 @18 y≈1、艺术家 @13 y≈24。
-FONT_DIR = os.environ.get('JUBEAT_FONT_DIR', r'<GAME_ROOT>\data\font')
+FONT_DIR = os.environ.get('JUBEAT_FONT_DIR') or r'<GAME_ROOT>\data\font'
 DEFAULT_FONT = os.path.join(FONT_DIR, 'dfgothw5.ttc')
 DEFAULT_SIZE = {'mini': 13, 'wide': 18}
 DEFAULT_POS = {'mini': (17, 4), 'wide': (4, 1)}
 ARTIST_SIZE = 13
 ARTIST_POS = {'mini': None, 'wide': (4, 24)}
 
+#: 曲名文本条要渲染中文（如 marker "[自制]"），必须用**带 CJK 的字体**渲染，
+#: 否则会画成一串白框。按优先级查找：
+#:   ① 游戏自己的日文字体 <游戏根>/data/font/dfgothw5.ttc（首选，风格最贴合）
+#:   ② 环境变量 JUBEAT_FONT_DIR 指定的目录
+#:   ③ 打包自带的思源黑体（assets/ub_cjk_font.otf）—— 保证任何机器都能渲染
+_CJK_FALLBACKS = ('ub_cjk_font.otf', 'ub_cjk_font.ttf')
+
+
+def game_font(game=None) -> str:
+    """返回用于渲染曲名文本条的字体文件路径（找不到返回 None）。
+
+    🔴 曾经把路径硬编码成开发机的 `F:\\jubeat_pack_src\\...`，在实机上必然找不到，
+    于是回退到 arial —— arial 没有汉字，`[自制]` 就被画成一串白框。
+    """
+    cands = []
+    if game:
+        cands.append(os.path.join(game, 'data', 'font', 'dfgothw5.ttc'))
+    if os.environ.get('JUBEAT_FONT_DIR'):
+        cands.append(os.path.join(FONT_DIR, 'dfgothw5.ttc'))
+    cands.append(DEFAULT_FONT)
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in _CJK_FALLBACKS:
+        cands.append(os.path.join(here, 'assets', name))
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        for name in _CJK_FALLBACKS:
+            cands.append(os.path.join(meipass, 'assets', name))
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
 
 def _load_font(fp, pt):
-    try:
-        return ImageFont.truetype(fp, pt)
-    except Exception:
+    """加载字体；fp 为空/加载失败时依次尝试 CJK 兜底字体，最后才用 PIL 默认。"""
+    tried = []
+    for cand in (fp, game_font()):
+        if cand and cand not in tried:
+            tried.append(cand)
+            try:
+                return ImageFont.truetype(cand, pt)
+            except Exception:                                # noqa: BLE001
+                pass
+    for name in ('arial.ttf', 'Arial.ttf'):
         try:
-            return ImageFont.truetype('arial.ttf', pt)
-        except Exception:
-            return ImageFont.load_default()
+            return ImageFont.truetype(name, pt)
+        except Exception:                                    # noqa: BLE001
+            pass
+    return ImageFont.load_default()
 
 
 def make_title_png(text, slot='mini', marker='', artist=None, font=None, size=None,

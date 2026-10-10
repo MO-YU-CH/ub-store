@@ -904,38 +904,43 @@ class StoreGUI:
             if not it.get("dir"):
                 continue
             if it.get("installed_music_id"):
-                blocked.append((name, it.get("installed_music_id")))
+                blocked.append((name, it.get("dir"), it.get("installed_music_id")))
             else:
-                todo.append((name, it.get("dir")))
+                todo.append((name, it.get("dir"), None))
+        # 已装进游戏的：问要不要**一并卸载**（否则游戏里会留下无效曲目）
         if blocked:
-            names = "、".join("%s(id=%s)" % (n, m) for n, m in blocked[:6])
-            if not messagebox.askyesno(
+            names = "、".join("%s(id=%s)" % (n, m) for n, _d, m in blocked[:6])
+            if messagebox.askyesno(
                     "有已装进游戏的谱面",
                     "勾选的里面有 %d 个已经装进游戏：\n  %s\n\n"
-                    "删除本地文件后，游戏里会留下无效曲目。\n\n"
-                    "建议先取消除勾选并【卸载】它们。\n"
-                    "仍要连同这些一起删除本地文件吗？" % (len(blocked), names)):
+                    "【是】= 先从游戏卸载，再删除这些本地文件（推荐）\n"
+                    "【否】= 取消，什么都不做"
+                    % (len(blocked), names)):
+                todo += blocked
+            else:
                 return
-            todo += blocked
         if not todo:
             messagebox.showinfo("提示", "没有可删除的条目。")
             return
         if not messagebox.askyesno(
-                "批量删除本地文件",
-                "将删除 %d 个谱面的下载文件（只清本地缓存）：\n  %s\n\n确定？"
-                % (len(todo), "、".join(n for n, _ in todo[:6])
-                   + ("…" if len(todo) > 6 else ""))):
+                "批量删除",
+                "将删除 %d 个谱面的下载文件：\n  %s\n\n"
+                "其中 %d 个会先从游戏卸载。确定？"
+                % (len(todo), "、".join(n for n, _d, _m in todo[:6])
+                   + ("…" if len(todo) > 6 else ""), len(blocked))):
             return
         self.set_status("开始批量删除 %d 个…" % len(todo))
         self.progress.configure(value=0, maximum=len(todo))
 
         def work():
             ok, fail, total = [], [], 0
-            for i, (name, folder) in enumerate(todo, 1):
+            for i, (name, folder, mid) in enumerate(todo, 1):
                 self.async_.q.put((self.set_status,
                                    ("批量删除 %d/%d：%s" % (i, len(todo), name),), {}))
                 self.async_.q.put((self.progress.configure, (), {"value": i - 1}))
                 try:
+                    if mid:
+                        S.uninstall_music(mid)      # 先卸载，避免游戏里留孤儿条目
                     res = S.delete_downloaded(folder, force=True)
                     total += res.get("freed", 0)
                     ok.append(name)
@@ -951,7 +956,7 @@ class StoreGUI:
                             % (len(ok), len(fail), mb))
             lines = []
             if ok:
-                lines.append("已删除 %d 个，释放 %.1f MB：" % (len(ok), mb))
+                lines.append("已卸载并删除 %d 个，释放 %.1f MB：" % (len(ok), mb))
                 for n in ok[:12]:
                     lines.append("   · %s" % n)
                 if len(ok) > 12:
@@ -963,6 +968,10 @@ class StoreGUI:
                     lines.append("   · %s：%s" % (n, str(e)[:80]))
             messagebox.showinfo("批量删除完成", "\n".join(lines))
             self.reload_downloaded()
+            try:
+                self.reload_installed()
+            except Exception:                                # noqa: BLE001
+                pass
 
         self.async_.run(work, done,
                         lambda e: (messagebox.showerror("批量删除失败", str(e)),
@@ -1136,6 +1145,8 @@ class StoreGUI:
             bar, text="批量卸载(0)", style="Accent.TButton",
             command=self.batch_uninstall_installed)
         self.btn_batch_uninstall_all.pack(side="left", padx=(12, 4))
+        ttk.Button(bar, text="检查孤儿条目",
+                   command=self.check_orphans).pack(side="left", padx=(12, 4))
         ttk.Label(bar, text="（勾选卡片左上角方框后点按钮）",
                   style="Dim.TLabel").pack(side="left", padx=8)
 
@@ -1144,6 +1155,74 @@ class StoreGUI:
             on_select=self.on_installed_select,
             multi=True, on_check=self._refresh_installed_batch_button)
         self.installed_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def check_orphans(self):
+        """检查"曲表里有、文件却没了"的自制谱条目（会让游戏报错/白框）。"""
+        game = self._require_game()
+        if not game:
+            return
+        self.set_status("正在检查孤儿条目…")
+
+        def work():
+            return S.find_orphans(game)
+
+        def done(orphans):
+            if not orphans:
+                self.set_status("检查完成：没有孤儿条目 ✅")
+                messagebox.showinfo(
+                    "检查孤儿条目",
+                    "没有发现问题。\n\n"
+                    "（曲表里的自制谱条目都有对应的文件）")
+                return
+            lines = []
+            for o in orphans[:20]:
+                lines.append("   · id=%s  缺 %d 个文件"
+                             % (o["music_id"], len(o["missing"])))
+            if len(orphans) > 20:
+                lines.append("   … 还有 %d 个" % (len(orphans) - 20))
+            detail = "\n".join(lines)
+            if not messagebox.askyesno(
+                    "发现 %d 个孤儿条目" % len(orphans),
+                    "这些曲表条目在游戏里保留着，但文件已经不在了，\n"
+                    "游戏启动时会报错（贴图错误、甚至 SSD READ ERROR）：\n\n"
+                    "%s\n\n"
+                    "【是】= 立即清理这些曲表条目（会先自动备份曲表）\n"
+                    "【否】= 暂不处理" % detail):
+                self.set_status("发现 %d 个孤儿条目（未处理）" % len(orphans))
+                return
+            self.set_status("正在清理 %d 个孤儿条目…" % len(orphans))
+
+            def work2():
+                return S.cleanup_orphans(game, [o["music_id"] for o in orphans])
+
+            def done2(res):
+                ok, fail = res["removed"], res["failed"]
+                self.set_status("孤儿清理完成：成功 %d，失败 %d" % (len(ok), len(fail)))
+                msg = []
+                if ok:
+                    msg.append("已清理 %d 个：" % len(ok))
+                    for mid, _bak in ok:
+                        msg.append("   · music_id=%s" % mid)
+                    msg.append("")
+                    msg.append("曲表已自动备份（同目录 *.bak_orphan_*）")
+                if fail:
+                    msg.append("")
+                    msg.append("失败 %d 个：" % len(fail))
+                    for mid, e in fail[:8]:
+                        msg.append("   · %s：%s" % (mid, str(e)[:70]))
+                messagebox.showinfo("孤儿清理完成", "\n".join(msg))
+                try:
+                    self.reload_installed()
+                except Exception:                            # noqa: BLE001
+                    pass
+
+            self.async_.run(work2, done2,
+                            lambda e: (messagebox.showerror("清理失败", str(e)),
+                                       self.set_status("清理失败：%s" % e)))
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("检查失败", str(e)),
+                                   self.set_status("检查失败：%s" % e)))
 
     def _refresh_installed_batch_button(self):
         try:
@@ -1690,41 +1769,71 @@ class StoreGUI:
             side="left", fill="x", expand=True, padx=(4, 0))
 
     def delete_card(self, item):
-        """删除本地下载的谱面文件（不动游戏）。"""
+        """删除本地下载的谱面文件。若已装进游戏，**提示一并卸载**再删。"""
         folder = item.get("dir")
         if not folder:
             messagebox.showinfo("提示", "该卡片缺少下载目录信息。")
             return
         title = item.get("title") or os.path.basename(folder)
         mid = item.get("installed_music_id")
+
+        def do_delete():
+            if not messagebox.askyesno(
+                    "删除本地谱面",
+                    "将从磁盘删除《%s》的下载文件：\n\n  %s\n\n确定删除？"
+                    % (title, folder)):
+                return
+
+            def work():
+                return S.delete_downloaded(folder, force=bool(mid))
+
+            def done(res):
+                mb = res.get("freed", 0) / 1048576.0
+                self.set_status("已删除《%s》，释放 %.1f MB" % (title, mb))
+                self.reload_downloaded()
+                try:
+                    self.reload_installed()
+                except Exception:                            # noqa: BLE001
+                    pass
+
+            def err(e):
+                messagebox.showerror("删除失败", str(e))
+                self.set_status("删除失败：%s" % e)
+
+            self.set_status("正在删除《%s》…" % title)
+            self.async_.run(work, done, err)
+
+        # 已装进游戏 → 先问要不要一并卸载（否则游戏里会留下无效曲目）
         if mid:
-            messagebox.showwarning(
-                "已装进游戏",
-                "《%s》已经装进游戏（music_id=%s）。\n\n"
-                "建议先到【已装自制谱】页【卸载】，再删除本地文件，\n"
-                "否则游戏里会留下一条无效曲目。" % (title, mid))
+            if messagebox.askyesno(
+                    "该谱面已装进游戏",
+                    "《%s》已经装进游戏（music_id=%s）。\n\n"
+                    "【是】= 先从游戏卸载，再删除本地文件（推荐）\n"
+                    "【否】= 取消，什么都不做\n\n"
+                    "（只想删本地文件、保留游戏里那条的话，"
+                    "请到【已装自制谱】页单独操作）" % (title, mid)):
+                self.set_status("正在卸载《%s》…" % title)
+
+                def work():
+                    S.uninstall_music(mid)
+                    return S.delete_downloaded(folder, force=True)
+
+                def done(res):
+                    mb = res.get("freed", 0) / 1048576.0
+                    self.set_status("已卸载并删除《%s》，释放 %.1f MB" % (title, mb))
+                    self.reload_downloaded()
+                    try:
+                        self.reload_installed()
+                    except Exception:                        # noqa: BLE001
+                        pass
+
+                def err(e):
+                    messagebox.showerror("卸载/删除失败", str(e))
+                    self.set_status("卸载/删除失败：%s" % e)
+
+                self.async_.run(work, done, err)
             return
-        if not messagebox.askyesno(
-                "删除本地谱面",
-                "将从磁盘删除《%s》的下载文件：\n\n  %s\n\n"
-                "（只删本地缓存，不影响游戏里已装的曲子）\n\n确定删除？"
-                % (title, folder)):
-            return
-
-        def work():
-            return S.delete_downloaded(folder)
-
-        def done(res):
-            mb = res.get("freed", 0) / 1048576.0
-            self.set_status("已删除《%s》，释放 %.1f MB" % (title, mb))
-            self.reload_downloaded()
-
-        def err(e):
-            messagebox.showerror("删除失败", str(e))
-            self.set_status("删除失败：%s" % e)
-
-        self.set_status("正在删除《%s》…" % title)
-        self.async_.run(work, done, err)
+        do_delete()
 
     # ---- 本地导入：谱面 / 官方更新包 ----
     def _data_dir(self):
