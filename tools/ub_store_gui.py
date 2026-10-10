@@ -34,6 +34,14 @@ try:
     import ub_update as U                  # 自更新模块（源码模式可能缺，容错）
 except Exception:                                        # noqa: BLE001
     U = None
+try:
+    import ub_import as I                  # 本地导入（谱面 / 更新包）
+except Exception:                                        # noqa: BLE001
+    I = None
+try:
+    import ub_updater as UU                # 官方更新包应用器
+except Exception:                                        # noqa: BLE001
+    UU = None
 
 APP_TITLE = "jubeat 自制谱商店 — Malody 谱库 → 下载 → 装进 jubeat"
 DISCLAIMER = (
@@ -362,14 +370,15 @@ class StoreGUI:
         self._post_start()
 
     def _post_start(self):
-        """启动后的收尾：清掉自更新遗留文件，按配置做一次静默版本检查。"""
-        if U is None:
-            return
+        """启动后的收尾：清理遗留文件、启用拖放、按配置做静默版本检查。"""
         try:
-            if U.cleanup_old():
+            if U is not None and U.cleanup_old():
                 self.set_status("已清理上次更新留下的旧文件")
         except Exception:                                    # noqa: BLE001
             pass
+        self._enable_drop()
+        if U is None:
+            return
         if not self.cfg.get("check_update_on_start", True):
             return
         # 延迟 2s，别和首屏加载抢网络
@@ -377,6 +386,89 @@ class StoreGUI:
             self.root.after(2000, lambda: self.check_update(interactive=False))
         except Exception:                                    # noqa: BLE001
             pass
+
+    # ---- 拖放（原生 WM_DROPFILES，不依赖 tkinterdnd2）----
+    def _enable_drop(self):
+        """把文件拖到窗口上即可导入。任何环节失败都静默跳过，不影响主功能。"""
+        if os.name != "nt" or "--selftest" in sys.argv:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32, shell32 = ctypes.windll.user32, ctypes.windll.shell32
+            hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            self._drop_hwnd = hwnd
+            shell32.DragAcceptFiles(wintypes.HWND(hwnd), True)
+
+            WM_DROPFILES = 0x0233
+            GWLP_WNDPROC = -4
+            WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND,
+                                         ctypes.c_uint, wintypes.WPARAM,
+                                         wintypes.LPARAM)
+            if ctypes.sizeof(ctypes.c_void_p) == 8:
+                get_p, set_p = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
+                get_p.restype = ctypes.c_void_p
+                get_p.argtypes = [wintypes.HWND, ctypes.c_int]
+                set_p.restype = ctypes.c_void_p
+                set_p.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+            else:
+                get_p, set_p = user32.GetWindowLongW, user32.SetWindowLongW
+                get_p.restype = ctypes.c_long
+                get_p.argtypes = [wintypes.HWND, ctypes.c_int]
+                set_p.restype = ctypes.c_long
+                set_p.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+
+            old_proc = get_p(hwnd, GWLP_WNDPROC)
+
+            # ★ 必须显式声明 CallWindowProcW 的类型：否则 64 位下 old_proc
+            #   会被 ctypes 当成 int 截断，回调直接报 "Exception ignored"。
+            CB = (ctypes.c_void_p if ctypes.sizeof(ctypes.c_void_p) == 8
+                  else ctypes.c_long)
+            user32.CallWindowProcW.restype = CB
+            user32.CallWindowProcW.argtypes = [CB, wintypes.HWND, ctypes.c_uint,
+                                               wintypes.WPARAM, wintypes.LPARAM]
+            # DragQueryFileW 也要声明，避免参数被当 int
+            shell32.DragQueryFileW.restype = ctypes.c_uint
+            shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, ctypes.c_uint,
+                                               ctypes.c_wchar_p, ctypes.c_uint]
+            shell32.DragFinish.argtypes = [wintypes.HANDLE]
+
+            def handler(h, msg, wp, lp):
+                if msg == WM_DROPFILES:
+                    try:
+                        n = shell32.DragQueryFileW(wp, 0xFFFFFFFF, None, 0)
+                        buf = ctypes.create_unicode_buffer(32768)
+                        paths = []
+                        for i in range(n):
+                            if shell32.DragQueryFileW(wp, i, buf, 32768):
+                                paths.append(buf.value)
+                        shell32.DragFinish(wp)
+                        if paths:
+                            self.root.after(0, lambda p=list(paths): self._on_drop(p))
+                    except Exception:                        # noqa: BLE001
+                        pass
+                    return 0
+                try:
+                    return user32.CallWindowProcW(old_proc, h, msg, wp, lp)
+                except Exception:                            # noqa: BLE001
+                    return 0
+
+            # ★ 必须保住引用，否则回调被 GC 会直接崩窗口
+            self._wndproc = WNDPROC(handler)
+            set_p(hwnd, GWLP_WNDPROC, ctypes.cast(self._wndproc, ctypes.c_void_p))
+            self._drop_ok = True
+        except Exception:                                    # noqa: BLE001
+            self._wndproc = None
+            self._drop_ok = False
+
+    def _on_drop(self, paths):
+        """处理拖入的文件/目录。"""
+        if I is None:
+            messagebox.showinfo("提示", "缺少 ub_import.py 模块。")
+            return
+        found = I.classify_paths(paths)
+        self._handle_found(found, hint="拖入 %d 项" % len(paths))
 
         if not self.cfg.get("disclaimer_accepted"):
             self._disc_after = self.root.after(
@@ -438,6 +530,12 @@ class StoreGUI:
     def _build_menu(self):
         m = tk.Menu(self.root)
         fm = tk.Menu(m, tearoff=0)
+        fm.add_command(label="导入谱面文件…", command=self.import_charts)
+        fm.add_command(label="导入官方更新包…", command=self.import_pack)
+        fm.add_separator()
+        fm.add_command(label="扫描导入目录", command=self.scan_import_dir)
+        fm.add_command(label="打开导入目录", command=self.open_import_dir)
+        fm.add_separator()
         fm.add_command(label="设置缓存目录…", command=self.choose_cache_dir)
         fm.add_command(label="打开数据目录", command=self.open_data_dir)
         fm.add_command(label="打开下载目录", command=self.open_download_dir)
@@ -971,6 +1069,226 @@ class StoreGUI:
                        command=lambda it=item: self.one_click_install_card(
                            it)).pack(fill="x")
 
+    # ---- 本地导入：谱面 / 官方更新包 ----
+    def _data_dir(self):
+        return getattr(S, "DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+
+    def _require_game(self):
+        """确保有可用的游戏目录，没有就引导用户指定。"""
+        game = self.game_dir or None
+        if not game:
+            try:
+                game = S.auto_detect_game()
+            except Exception:                                # noqa: BLE001
+                game = None
+        if not game:
+            if messagebox.askyesno(
+                    "还没指定游戏目录",
+                    "找不到 jubeat 的 contents 目录。\n\n现在手动指定一次？"):
+                self.choose_game_dir()
+                game = self.game_dir
+        if not game:
+            self.set_status("已取消：没有游戏目录")
+        return game
+
+    def open_import_dir(self):
+        if I is None:
+            messagebox.showinfo("提示", "缺少 ub_import.py 模块。")
+            return
+        d = I.import_dir(self._data_dir())
+        self._open_path(d)
+        self.set_status("把谱面或更新包放进这个文件夹，再点【文件 → 扫描导入目录】")
+
+    def scan_import_dir(self):
+        if I is None:
+            messagebox.showinfo("提示", "缺少 ub_import.py 模块。")
+            return
+        d = I.import_dir(self._data_dir())
+        found = I.classify_paths([d])
+        self._handle_found(found, hint="导入目录：%s" % d)
+
+    def _handle_found(self, found, hint=""):
+        """把扫描结果交给用户确认，然后执行。"""
+        charts, packs = found.get("charts") or [], found.get("packs") or []
+        if not charts and not packs:
+            messagebox.showinfo(
+                "没有发现可导入的文件",
+                "%s\n\n支持：\n  · 谱面 .mc / .mcz\n  · 官方更新包 .7z / .zip"
+                % hint)
+            return
+        lines = []
+        if charts:
+            lines.append("谱面 %d 个：" % len(charts))
+            for c in charts[:12]:
+                lines.append("   · %s" % os.path.basename(c))
+            if len(charts) > 12:
+                lines.append("   … 还有 %d 个" % (len(charts) - 12))
+        if packs:
+            if lines:
+                lines.append("")
+            lines.append("更新包 %d 个：" % len(packs))
+            for p in packs[:8]:
+                lines.append("   · %s" % os.path.basename(p))
+            if len(packs) > 8:
+                lines.append("   … 还有 %d 个" % (len(packs) - 8))
+        if not messagebox.askyesno("确认导入", "\n".join(lines) + "\n\n继续？"):
+            return
+        # 更新包需要逐个走"扫描 → 确认 → 应用"，所以分开处理
+        if charts:
+            self._install_units(I.plan_units(charts, self._data_dir()), charts)
+        for p in packs:
+            self._apply_pack_interactive(p)
+
+    def import_charts(self):
+        if I is None:
+            messagebox.showinfo("提示", "缺少 ub_import.py 模块。")
+            return
+        paths = filedialog.askopenfilenames(
+            title="选择谱面文件（可多选；建议连同音源/封面放同一目录）",
+            filetypes=[("Malody 谱面", "*.mc *.mcz"), ("所有文件", "*.*")])
+        if not paths:
+            return
+        found = I.classify_paths(list(paths))
+        self._handle_found(found, hint="已选文件")
+
+    def import_pack(self):
+        paths = filedialog.askopenfilenames(
+            title="选择 jubeat 官方更新包",
+            filetypes=[("更新包", "*.7z *.zip"), ("所有文件", "*.*")])
+        if not paths:
+            return
+        for p in paths:
+            self._apply_pack_interactive(p)
+
+    # ---- 更新包：扫描 → 确认 → 应用 ----
+    def _apply_pack_interactive(self, pack_path):
+        if UU is None:
+            messagebox.showinfo("提示", "缺少 ub_updater.py 模块。")
+            return
+        game = self._require_game()
+        if not game:
+            return
+        self.set_status("正在扫描更新包…")
+
+        def work():
+            return UU.do_scan(pack_path)
+
+        def done(scan):
+            marks = scan.get("deletion_markers") or {}
+            n_mark = sum(len(v) for v in marks.values())
+            ids = scan.get("affected_song_ids") or []
+            msg = ("更新包：%s\n\n"
+                   "条目总数：%d\n"
+                   "  普通文件：%d\n"
+                   "  谱面：%d\n"
+                   "  贴图：%d\n"
+                   % (os.path.basename(pack_path), scan.get("entries", 0),
+                      scan.get("normal_files", 0), scan.get("charts", 0),
+                      scan.get("textures", 0)))
+            if n_mark:
+                msg += ("\n⚠ 含删除标记 %d 个（涉及 %d 首曲目 id）\n"
+                        "  应用时会先备份；是否同时执行删除？\n"
+                        % (n_mark, len(ids)))
+                msg += "\n选【是】= 应用并执行删除\n选【否】= 只应用，跳过删除\n"
+                ans = messagebox.askyesnocancel("应用更新包", msg)
+                if ans is None:
+                    return
+                allow_delete = bool(ans)
+            else:
+                msg += "\n游戏目录：%s\n\n是否应用？" % game
+                if not messagebox.askyesno("应用更新包", msg):
+                    return
+                allow_delete = False
+
+            self.set_status("正在应用更新包（已备份）…")
+
+            def work2():
+                try:
+                    return UU.do_apply(pack_path, game,
+                                       dry_run=False, allow_delete=allow_delete)
+                except SystemExit as ex:                     # do_apply 用 SystemExit 报错
+                    raise RuntimeError(str(ex))
+
+            def done2(res):
+                plan = (res or {}).get("plan") or res or {}
+                n_apply = len(plan.get("apply") or [])
+                n_skip = len(plan.get("skip_marker") or [])
+                self.set_status("更新包应用完成（写入 %d 项）" % n_apply)
+                messagebox.showinfo(
+                    "更新包已应用",
+                    "《%s》应用完成。\n\n写入 %d 项\n跳过删除标记 %d 项\n\n"
+                    "备份在 ub_updater 工作目录的 backup 下，可回退。"
+                    % (os.path.basename(pack_path), n_apply, n_skip))
+
+            def err2(e):
+                messagebox.showerror("应用更新包失败", str(e))
+                self.set_status("应用更新包失败：%s" % e)
+
+            self.async_.run(work2, done2, err2)
+
+        self.async_.run(work, done,
+                        lambda e: messagebox.showerror("扫描更新包失败", str(e)))
+
+    # ---- 批量安装谱面 ----
+    def _install_units(self, units, chart_paths):
+        if not units:
+            return
+        game = self._require_game()
+        if not game:
+            return
+        titles = [u["title"] for u in units]
+        head = "、".join(titles[:4]) + ("…" if len(titles) > 4 else "")
+        if not messagebox.askyesno(
+                "安装自制谱",
+                "将安装 %d 个谱面：\n  %s\n\n"
+                "  · 自动选空闲 music_id、只新增不覆盖\n"
+                "  · 优先用谱面自带音源，没有则用下载的封面/占位\n\n"
+                "确定继续？（每个谱面编码音源约需十秒）" % (len(units), head)):
+            return
+
+        def work():
+            done, failed = [], []
+            for idx, u in enumerate(units, 1):
+                self.async_.q.put((self.set_status,
+                                   ("安装 %d/%d：%s" % (idx, len(units), u["title"]),), {}))
+
+                def prog(_i, msg, _t=u["title"]):
+                    self.async_.q.put((self.set_status, ("%s：%s" % (_t, msg),), {}))
+                try:
+                    res = S.one_click_install(u["unit_dir"], progress=prog)
+                    mid = ((res or {}).get("plan") or {}).get("music_id")
+                    done.append((u["title"], mid))
+                except Exception as ex:                      # noqa: BLE001
+                    failed.append((u["title"], str(ex)))
+            return {"done": done, "failed": failed}
+
+        def done(res):
+            try:
+                I.cleanup_stage(self._data_dir())
+            except Exception:                                # noqa: BLE001
+                pass
+            d, f = res["done"], res["failed"]
+            self.set_status("导入完成：成功 %d，失败 %d" % (len(d), len(f)))
+            lines = []
+            if d:
+                lines.append("成功 %d 个：" % len(d))
+                for t, mid in d:
+                    lines.append("   · %s  →  music_id=%s" % (t, mid))
+            if f:
+                lines.append("")
+                lines.append("失败 %d 个：" % len(f))
+                for t, e in f:
+                    lines.append("   · %s：%s" % (t, e[:80]))
+            messagebox.showinfo("导入完成",
+                                "\n".join(lines) + "\n\n可在【已装自制谱】页查看。")
+            try:
+                self.reload_installed()
+            except Exception:                                # noqa: BLE001
+                pass
+
+        self.async_.run(work, done,
+                        lambda e: messagebox.showerror("导入失败", str(e)))
+
     def one_click_install_card(self, item):
         folder = item.get("dir")
         if not folder:
@@ -1375,6 +1693,16 @@ def main(argv=None):
         print("selftest OK: tabs=%d" % len(app.notebook.tabs()))
         root.destroy()
         return 0
+    # 命令行带路径（把文件拖到 exe 图标上、或从"发送到"调用）→ 启动后直接导入
+    extra = [a for a in argv if a and not a.startswith("-")]
+    if extra and I is not None:
+        def _auto_import():
+            app._handle_found(I.classify_paths(extra),
+                              hint="命令行传入 %d 项" % len(extra))
+        try:
+            root.after(700, _auto_import)
+        except Exception:                                    # noqa: BLE001
+            pass
     root.mainloop()
     return 0
 

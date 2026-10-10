@@ -100,19 +100,67 @@ class TestCheck(unittest.TestCase):
         self.assertTrue(r["newer"])
         self.assertIn("没有找到资产", r["error"])
 
-    def test_404_means_no_release_yet(self):
+    def test_404_falls_back_then_fails(self):
+        """Release 404 且仓库文件也拿不到 → 整体失败（两路都试过）"""
         import urllib.error
         err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
-        with self._patch(error=err):
+        with self._patch(error=err), \
+                mock.patch.object(U, "_get_text", side_effect=OSError("no net")):
             r = U.check()
         self.assertFalse(r["ok"])
         self.assertIn("尚未发布", r["error"])
 
-    def test_network_error_is_caught(self):
-        with self._patch(error=OSError("boom")):
+    def test_network_error_falls_back_then_fails(self):
+        with self._patch(error=OSError("boom")), \
+                mock.patch.object(U, "_get_text", side_effect=OSError("boom")):
             r = U.check()
         self.assertFalse(r["ok"])
         self.assertIn("OSError", r["error"])
+
+    # ---- 回退路径（Release 不可用时读仓库文件）----
+    def test_falls_back_to_repo_version(self):
+        import urllib.error
+        err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with self._patch(error=err), \
+                mock.patch.object(U, "_get_text", return_value="1.2.0\n"), \
+                mock.patch.object(U, "_opener") as op:
+            op.return_value.open.return_value.close.return_value = None
+            r = U.check(current="1.0.0", arch="win32")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["source"], "repo")
+        self.assertEqual(r["latest"], "1.2.0")
+        self.assertTrue(r["newer"])
+        self.assertIn("release/ub_store.exe", r["asset_url"])
+
+    def test_fallback_same_version_not_newer(self):
+        import urllib.error
+        err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with self._patch(error=err), \
+                mock.patch.object(U, "_get_text", return_value="1.0.0"), \
+                mock.patch.object(U, "_opener"):
+            r = U.check(current="1.0.0")
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["newer"])
+
+    def test_fallback_empty_version_is_error(self):
+        import urllib.error
+        err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with self._patch(error=err), \
+                mock.patch.object(U, "_get_text", return_value="  \n"):
+            r = U.check()
+        self.assertFalse(r["ok"])
+
+    def test_release_wins_over_repo(self):
+        """Release 可用时不走回退。"""
+        payload = {"tag_name": "v2.0.0", "body": "x", "html_url": "h",
+                   "assets": [{"name": "ub_store.exe",
+                               "browser_download_url": "https://e/a.exe"}]}
+        with self._patch(payload), \
+                mock.patch.object(U, "_get_text") as gt:
+            r = U.check(current="1.0.0", arch="win32")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["source"], "release")
+        gt.assert_not_called()
 
 
 class TestReplaceSelf(unittest.TestCase):
