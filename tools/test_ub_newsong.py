@@ -170,9 +170,9 @@ class TestIdBaseSafety(unittest.TestCase):
         # 且离官方已用到的序号要拉开距离
         self.assertGreater(off - (N.OFFICIAL_ID_HINT_MAX % 1000000), 5000)
 
-    def test_default_base_starts_with_90009(self):
-        """用户指定的格式：90009xxx"""
-        self.assertEqual(N.DEFAULT_BASE, 90009000)
+    def test_default_base_is_highest_slot(self):
+        """用户方案：从 9999 开始往下记。"""
+        self.assertEqual(N.DEFAULT_BASE, 90009999)
 
     def test_default_base_is_valid(self):
         self.assertIsNone(N.id_problem(N.DEFAULT_BASE))
@@ -201,18 +201,18 @@ class TestIdBaseSafety(unittest.TestCase):
     def test_safe_base_fixes_cross_segment(self):
         for bad in (99900000, 99000000, 91000000):
             fixed, note = N.safe_base(bad)
-            self.assertEqual(fixed, 90009000)
+            self.assertEqual(fixed, N.DEFAULT_BASE)
             self.assertIsNotNone(note)
             self.assertIsNone(N.id_problem(fixed))
 
     def test_safe_base_fixes_official_tail(self):
         fixed, note = N.safe_base(90001036)
-        self.assertEqual(fixed, 90009000)
+        self.assertEqual(fixed, N.DEFAULT_BASE)
         self.assertIsNotNone(note)
 
     def test_safe_base_keeps_good_value(self):
-        fixed, note = N.safe_base(90009000)
-        self.assertEqual(fixed, 90009000)
+        fixed, note = N.safe_base(N.DEFAULT_BASE)
+        self.assertEqual(fixed, N.DEFAULT_BASE)
         self.assertIsNone(note)
 
     # ---- recommend_ids ----
@@ -220,15 +220,23 @@ class TestIdBaseSafety(unittest.TestCase):
         """即使 base 配成跨段的值，也会被挪到安全区。"""
         with mock.patch.object(N, "scan_occupied", return_value={"union": set()}):
             ids = N.recommend_ids("X", base=99900000, count=3)
-        self.assertEqual(ids, [90009000, 90009001, 90009002])
+        # 跨段起点会被纠正到 DEFAULT_BASE，并且**从高往低**取
+        self.assertEqual(ids, [90009999, 90009998, 90009997])
         for i in ids:
             self.assertIsNone(N.id_problem(i))
 
     def test_recommend_ids_skips_occupied(self):
-        occ = {90009000, 90009001}
+        occ = {90009999, 90009998}
         with mock.patch.object(N, "scan_occupied", return_value={"union": occ}):
-            ids = N.recommend_ids("X", base=90009000, count=3)
-        self.assertEqual(ids, [90009002, 90009003, 90009004])
+            ids = N.recommend_ids("X", base=90009999, count=3)
+        self.assertEqual(ids, [90009997, 90009996, 90009995])
+
+    def test_recommend_ids_skips_used_ledger(self):
+        """台账里用过的编号要跳过 —— 这是"不回收"的关键。"""
+        with mock.patch.object(N, "scan_occupied", return_value={"union": set()}):
+            ids = N.recommend_ids("X", base=90009999, count=3,
+                                  used={90009999, 90009997})
+        self.assertEqual(ids, [90009998, 90009996, 90009995])
 
 
 class TestBuildNewIfsSlots(unittest.TestCase):

@@ -1545,18 +1545,26 @@ def one_click_install(folder: str, game=None, music_id=None, own_audio=True,
         grouping_category = (cfg.get("custom_grouping_category") or "").strip() or None
 
     if music_id is None:
-        # 自制谱 id 段：优先用调用方指定 → 再 config.json 的 custom_id_base
-        # → 最后 N.DEFAULT_BASE。默认 90009000（90 段内、偏移够大）。
-        # 非法起点会被 recommend_ids() 内的 safe_base() 自动纠正。
+        # 自制谱编号：**从高往低找"从未分配过"的**（见 next_free_id 的说明）。
+        # 起点优先用调用方指定 → config.json 的 custom_id_base → DEFAULT_BASE。
+        # 🔴 关键：判据是"台账里没有 + 当前没占用"，**卸载不会把编号放回来**，
+        #    否则新曲会继承前一首的成绩。
         base = (id_base
                 or int(cfg.get("custom_id_base") or 0)
                 or N.DEFAULT_BASE)
-        music_id = N.recommend_ids(game, base, 1)[0]
+        sync_used_ids(game)                 # 首次升级时把已有自制谱补进台账
+        music_id = next_free_id(game, start=base)
     else:
         # 手动指定时也要校验：跨段会让游戏闪退，贴官方尾部会撞号
         prob = N.id_problem(music_id)
         if prob:
             raise StoreError(-1, "指定的 music_id 不可用：%s" % prob)
+        # 手工指定也要求"没用过"（除非调用方显式复用）
+        if str(int(music_id)) in _load_used_ids()["used"]:
+            raise StoreError(-1, (
+                "music_id=%s 之前已经用过了（台账登记过）。\n"
+                "复用会让新曲继承旧曲的游戏成绩，因此默认拒绝。\n"
+                "如确实要复用，请先手工编辑 used_ids.json。" % music_id))
     if not reading:
         reading = default_reading(card.get("title"))
 
@@ -1677,6 +1685,14 @@ def run_install(plan, apply=True, workdir=None, register_small=True, artist=None
     N = _newsong()
     wd = os.path.abspath(workdir or newsong_workdir())
     res = N.install(plan, apply=apply, workdir=wd)
+    if apply and not res.get("dry_run"):
+        # ★ 登记编号台账：分配过就永久占用，卸载也不释放
+        #   （否则新曲会继承旧曲的游戏成绩）
+        try:
+            mark_id_used(plan["music_id"], title=plan.get("title") or "",
+                         note="installed")
+        except Exception:                                    # noqa: BLE001
+            pass
     if apply and register_small and not res.get("dry_run"):
         try:
             marker = (load_config().get("custom_title_marker") or "").strip()
@@ -1706,6 +1722,134 @@ def run_uninstall(game, music_id, workdir=None):
 def verify_game(game):
     N = _newsong()
     return N.verify(game, as_json=False)
+
+
+# ---------------------------------------------------------------------------
+# music_id 台账（保证编号**只用一次、卸载不回收**）
+# ---------------------------------------------------------------------------
+# 🔴 为什么必须"不回收"：
+#   jubeat 的成绩是**按 music_id 存档**的。如果卸载后把编号放回去给下一首用，
+#   新曲会**继承前一首的成绩**（分数/达成率显示错乱）。
+#   ⇒ 只要分配过就永久占用，台账与"已装清单"分离：卸载只减 installed.json，
+#     台账只增不减。
+def used_ids_path() -> str:
+    """台账路径（**动态算**，跟随 DATA_DIR 变化，方便测试与便携模式）。"""
+    return os.path.join(DATA_DIR, "used_ids.json")
+
+
+def _load_used_ids() -> dict:
+    try:
+        with open(used_ids_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("used", {}), dict):
+            return d
+    except Exception:                                        # noqa: BLE001
+        pass
+    return {"used": {}}
+
+
+def _write_used_ids(d: dict) -> str:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(used_ids_path(), "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+    return used_ids_path()
+
+
+
+
+
+def list_used_ids() -> dict:
+    """返回台账 {"used": {id(str): {"title":…, "assigned_at":…}}}。"""
+    return _load_used_ids()
+
+
+def mark_id_used(music_id, title="", note="") -> dict:
+    """把编号登记为"已用过"（永久占用）。已登记则只补充信息。"""
+    d = _load_used_ids()
+    k = str(int(music_id))
+    rec = d["used"].setdefault(k, {})
+    if title:
+        rec["title"] = title
+    if note:
+        rec["note"] = note
+    rec.setdefault("assigned_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+    _write_used_ids(d)
+    return rec
+
+
+def sync_used_ids(game=None) -> dict:
+    """把"当前已装"与"曲表里现存的自制谱"补进台账（首次升级时迁移用）。
+
+    返回 {"added": [...], "total": n}
+    """
+    N = _newsong()
+    d = _load_used_ids()
+    added = []
+    # 1) 已装清单
+    for rec in list_installed():
+        mid = rec.get("music_id")
+        if mid is None:
+            continue
+        k = str(int(mid))
+        if k not in d["used"]:
+            d["used"][k] = {"title": rec.get("title") or "",
+                            "assigned_at": rec.get("installed_at")
+                            or time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "note": "迁移自已装清单"}
+            added.append(int(mid))
+    # 2) 曲表里现存的自制谱（可能已不在清单里）
+    if game:
+        try:
+            txt = open(N.music_table_path(game), encoding="utf-8",
+                       errors="replace").read()
+            for b in N.music_blocks(txt):
+                m = N.MID_RE.search(b)
+                if not m:
+                    continue
+                mid = int(m.group(1))
+                if (mid // 1000000) != N.CUSTOM_SEGMENT:
+                    continue
+                if (mid % 1000000) < N.OFFICIAL_SEQ_LIMIT:
+                    continue
+                k = str(mid)
+                if k not in d["used"]:
+                    d["used"][k] = {"title": "",
+                                    "assigned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "note": "迁移自曲表"}
+                    added.append(mid)
+        except Exception:                                    # noqa: BLE001
+            pass
+    if added:
+        _write_used_ids(d)
+    return {"added": sorted(added), "total": len(d["used"])}
+
+
+def next_free_id(game, start=None) -> int:
+    """按"**从高往低**"顺序找下一个**从未分配给自制谱**的编号。
+
+    用户约定：从 `90009999` 开始往下记（9999→9000→8999→…→2000），
+    用满 8000 个位置后报错，提示手工干预。
+    判据 = **不在台账里** 且 **当前未被占用**（双保险）。
+    """
+    N = _newsong()
+    d = _load_used_ids()
+    used = set(d["used"].keys())
+    occ = N.scan_occupied(game)["union"]
+    base = int(start or N.DEFAULT_BASE)
+    # 把起点规整到合法区（跨段/贴官方尾部会被纠正）
+    base, _note = N.safe_base(base)
+    seg = N.CUSTOM_SEGMENT
+    lo = seg * 1000000 + N.OFFICIAL_SEQ_LIMIT          # 90002000
+    hi = seg * 1000000 + 999999                        # 90009999
+    i = min(max(base, lo), hi)
+    while i >= lo:
+        if str(i) not in used and i not in occ:
+            return i
+        i -= 1
+    raise StoreError(-1, (
+        "自制谱编号已用尽（%d~%d 全部占用）。\n"
+        "请手动指定一个未用过的编号，或清理 used_ids.json 里不再需要的记录。"
+        % (lo, hi)))
 
 
 # ---------------------------------------------------------------------------

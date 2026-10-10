@@ -1103,5 +1103,75 @@ class TestOriginalTitleLang(unittest.TestCase):
         self.assertNotIn('lang="', src)
 
 
+class TestIdLedger(unittest.TestCase):
+    """编号台账：**只用一次、卸载不回收**。
+
+    背景：jubeat 的成绩按 music_id 存档。若卸载后把编号放回去给下一首用，
+    新曲会继承旧曲的成绩（分数/达成率错乱）。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="ub_ledger_")
+        self._orig = (S.DATA_DIR, S.MANIFEST_PATH)
+        S.DATA_DIR = self.tmp
+        S.MANIFEST_PATH = os.path.join(self.tmp, "installed.json")   # 模块级常量要显式改
+        # 造一个最小的游戏目录（曲表为空 = 无占用）
+        self.game = os.path.join(self.tmp, "contents")
+        for sub in ("data_mods/omnimix/ifs_pack",
+                    "data_mods/omnimix/d3/model",
+                    "data_mods/omnimix/music_info", "data"):
+            os.makedirs(os.path.join(self.game, sub), exist_ok=True)
+        with open(os.path.join(self.game, "data_mods/omnimix/music_info/music_omni.xml"),
+                  "w", encoding="utf-8") as f:
+            f.write("<data_num __type=\"s32\">0</data_num>")
+
+    def tearDown(self):
+        import shutil
+        S.DATA_DIR, S.MANIFEST_PATH = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ledger_path_follows_data_dir(self):
+        self.assertTrue(S.used_ids_path().startswith(self.tmp))
+
+    def test_allocate_descending(self):
+        """从 9999 往下分配。"""
+        a = S.next_free_id(self.game)
+        S.mark_id_used(a)
+        b = S.next_free_id(self.game)
+        S.mark_id_used(b)
+        self.assertEqual([a, b], [90009999, 90009998])
+
+    def test_used_ids_not_reused_after_uninstall(self):
+        """卸装不释放编号：台账只增不减 ⇒ 下次分配继续往下走。"""
+        first = S.next_free_id(self.game)
+        S.mark_id_used(first, title="Song A")
+        # 模拟"安装又卸载"（台账不变）
+        again = S.next_free_id(self.game)
+        self.assertNotEqual(again, first, "已用过的编号不能被再次分配")
+        self.assertEqual(again, first - 1)
+
+    def test_ledger_persists(self):
+        S.mark_id_used(90009999, title="X")
+        self.assertIn("90009999", S.list_used_ids()["used"])
+        # 重新读一遍（模拟重启）
+        self.assertIn("90009999", S.list_used_ids()["used"])
+
+    def test_sync_from_installed(self):
+        import json as _json
+        with open(os.path.join(S.DATA_DIR, "installed.json"), "w", encoding="utf-8") as f:
+            _json.dump({"items": [{"music_id": 90009000, "title": "Old"}]}, f)
+        r = S.sync_used_ids(self.game)
+        self.assertIn(90009000, r["added"])
+        self.assertIn("90009000", S.list_used_ids()["used"])
+
+    def test_exhaustion_raises(self):
+        """用满后要明确报错，而不是静默回绕。"""
+        d = {"used": {str(90000000 + off): {} for off in range(2000, 10000)}}
+        S._write_used_ids(d)
+        with self.assertRaises(S.StoreError):
+            S.next_free_id(self.game)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

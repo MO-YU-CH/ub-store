@@ -75,9 +75,12 @@ except Exception:              # pragma: no cover
 #    结果游戏登录时 **`W:EXCEPTION: avs-sort.c` 刷屏 24070 次后闪退**。
 #    ⇒ **游戏不接受"跨世代段"的 id**，自制谱必须留在官方当前世代段(90)内。
 #
-# ⇒ 自制段取 **90009000**：仍在 90 段内（段号合法），但段内偏移 9000
-#    远离官方已用的 1~1035，官方要再涨约 8000 首才会追上。
-DEFAULT_BASE = 90009000
+# ⇒ 自制段取 **90009999**（90 段内、偏移最高的位置），并且**从高往低**分配：
+#    90009999 → 90009998 → … → 90009000 → 90008999 → … → 90002000
+#    （共约 8000 个位置；用满后由 ub_store.next_free_id 报错提示手工干预）
+#    ⚠️ 编号**只用一次、卸载不回收**：jubeat 的成绩按 music_id 存档，
+#       复用编号会让新曲**继承旧曲的成绩**。台账见 ub_store.used_ids_path()。
+DEFAULT_BASE = 90009999
 #: 自制谱必须落在的世代段（官方当前世代 = 90）
 CUSTOM_SEGMENT = 90
 #: 官方 id 的已知上界（仅作参考/日志用，不参与分配决策）
@@ -441,15 +444,21 @@ def safe_base(base: int) -> tuple:
                           % (base, prob, DEFAULT_BASE))
 
 
-def recommend_ids(game: str, base: int = DEFAULT_BASE, count: int = 5):
+def recommend_ids(game: str, base: int = DEFAULT_BASE, count: int = 5, used=None):
+    """推荐可用编号：**从 base 往低走**，跳过"当前占用"与"台账里用过"的。
+
+    `used` 是"曾经分配过"的编号集合（永久占用，见 ub_store 的台账）。
+    """
     occ = scan_occupied(game)["union"]
+    used = set(str(x) for x in (used or ()))
     base, _note = safe_base(base)
+    lo = CUSTOM_SEGMENT * 1000000 + OFFICIAL_SEQ_LIMIT
     out = []
-    i = base
-    while len(out) < count and i < base + 100000:
-        if i not in occ:
+    i = min(base, CUSTOM_SEGMENT * 1000000 + 999999)
+    while len(out) < count and i >= lo:
+        if i not in occ and str(i) not in used:
             out.append(i)
-        i += 1
+        i -= 1
     return out
 
 

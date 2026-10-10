@@ -1147,8 +1147,10 @@ class StoreGUI:
         self.btn_batch_uninstall_all.pack(side="left", padx=(12, 4))
         ttk.Button(bar, text="检查残留数据",
                    command=self.check_orphans).pack(side="left", padx=(12, 4))
+        ttk.Button(bar, text="编号台账",
+                   command=self.show_id_ledger).pack(side="left", padx=4)
         ttk.Label(bar, text="（勾选卡片左上角方框后点按钮；"
-                            "「检查残留数据」会扫孤儿条目与孤儿文件）",
+                            "编号只用一次、卸载不回收，避免新曲继承旧成绩）",
                   style="Dim.TLabel").pack(side="left", padx=8)
 
         self.installed_grid = CardGrid(
@@ -1262,6 +1264,51 @@ class StoreGUI:
         self.async_.run(work, done,
                         lambda e: (messagebox.showerror("清理失败", str(e)),
                                    self.set_status("清理失败：%s" % e)))
+
+    def show_id_ledger(self):
+        """显示编号台账：下一个可用编号 + 已用编号列表。
+
+        编号**只用一次、卸载不回收** —— 因为 jubeat 的成绩按 music_id 存档，
+        复用编号会让新曲继承旧曲的成绩。
+        """
+        game = self._require_game()
+        if not game:
+            return
+
+        def work():
+            info = S.list_used_ids()["used"]
+            nxt = ""
+            try:
+                nxt = S.next_free_id(game)
+            except Exception as ex:                           # noqa: BLE001
+                nxt = "（%s）" % ex
+            return info, nxt
+
+        def done(res):
+            used, nxt = res
+            ids = sorted((int(k) for k in used), reverse=True)
+            lines = ["下一个可用编号：  %s" % nxt, ""]
+            lines.append("已分配过的编号：%d 个" % len(ids))
+            if ids:
+                lines.append("范围：%d ~ %d" % (min(ids), max(ids)))
+                lines.append("")
+                lines.append("最近 %d 个：" % min(20, len(ids)))
+                for i in ids[:20]:
+                    rec = used.get(str(i)) or {}
+                    t = rec.get("title") or ""
+                    lines.append("   %d%s" % (i, ("  " + t[:24]) if t else ""))
+                if len(ids) > 20:
+                    lines.append("   … 还有 %d 个" % (len(ids) - 20))
+            lines.append("")
+            lines.append("⚠️ 编号卸载后不会回收（避免新曲继承旧曲的游戏成绩）。")
+            lines.append("如需手工释放，可编辑：")
+            lines.append("   %s" % S.used_ids_path())
+            messagebox.showinfo("编号台账", "\n".join(lines))
+            self.set_status("已用编号 %d 个；下一个可用 %s" % (len(ids), nxt))
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("读取台账失败", str(e)),
+                                   self.set_status("读取台账失败：%s" % e)))
 
     def _refresh_installed_batch_button(self):
         try:
