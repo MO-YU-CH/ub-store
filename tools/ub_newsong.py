@@ -64,7 +64,22 @@ try:
 except Exception:              # pragma: no cover
     UA = None
 
-DEFAULT_BASE = 90001036        # 当前 9xxx 自制段的最大占用 90001035 之后
+# ---------------------------------------------------------------------------
+# 自制谱 music_id 分配区间
+# ---------------------------------------------------------------------------
+# 官方 id 规律实测：`<两位世代> <6 位序号>`，即 id = 世代*1000000 + 序号
+#   10000036 / 11000001 / 20000002 / 50000021 / 90001035
+# 世代取 10,11,20,30,…,90；**每段序号只用到 1~1010**（约千首）。
+# 官方下个更新包会从 90001036 继续往后排，所以自制谱不能贴官方尾部。
+#
+# ⇒ 自制段选 **99 段的 90 万偏移** 处：99900000。
+#    即使官方将来用到 99 段，它也只占到 99 0 01010 左右，
+#    离 99 900000 还差 89 万个位置；按每版千首算要近千个版本才可能追上。
+DEFAULT_BASE = 99900000
+#: 官方 id 的已知上界（仅作参考/日志用，不参与分配决策）
+OFFICIAL_ID_HINT_MAX = 90001035
+#: 官方"世代段"里被视为"会被官方占用"的段内偏移上限（实测约 1010，留足余量）
+OFFICIAL_SEQ_LIMIT = 100000
 DEFAULT_LEVEL = 1              # 自制谱定数固定 1（用户 2026-10-10 定；Malody meta 无 level）
 MUSIC_BLOCK_RE = re.compile(r'<data __type="void" id="\d+">.*?</data>', re.S)
 MID_RE = re.compile(r'<music_id __type="s32">(\d+)</music_id>')
@@ -206,8 +221,33 @@ def check_id_free(game: str, music_id: int):
     return (len(reasons) == 0), reasons
 
 
+def is_official_style_id(music_id: int) -> bool:
+    """判断这个 id 是否落在官方的"世代段"编号规律内。
+
+    官方 id = ``世代*1000000 + 序号``，世代取 10,11,20,…,90，
+    段内序号实测只用到 1~1010。所以**段内偏移小于 OFFICIAL_SEQ_LIMIT 的，
+    基本都会被官方将来用掉**。
+    """
+    return (music_id < 100000000
+            and (music_id % 1000000) < OFFICIAL_SEQ_LIMIT)
+
+
+def safe_base(base: int) -> tuple:
+    """把自制 id 起点规整到安全位置。返回 (调整后的 base, 说明)。
+
+    例如 90001036（紧贴官方尾部）或 99000000（99 段起点）都会被挪到
+    **99900000**——99 段里足够靠后的偏移，官方即便用到 99 段也远远够不到。
+    """
+    if not is_official_style_id(base):
+        return base, None
+    fixed = DEFAULT_BASE
+    return fixed, ("自制 id 起点 %d 落在官方编号规律内（官方按 世代*1000000+序号 "
+                   "从低位往后占用），已自动调整到 %d" % (base, fixed))
+
+
 def recommend_ids(game: str, base: int = DEFAULT_BASE, count: int = 5):
     occ = scan_occupied(game)["union"]
+    base, _note = safe_base(base)
     out = []
     i = base
     while len(out) < count and i < base + 100000:

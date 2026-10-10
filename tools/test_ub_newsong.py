@@ -150,6 +150,55 @@ class TestDefaultLevel(unittest.TestCase):
 # --------------------------------------------------------------------------
 # build_new_ifs 的分档写入
 # --------------------------------------------------------------------------
+class TestIdBaseSafety(unittest.TestCase):
+    """自制谱 id 段必须远离官方编号规律，否则会被后续官方更新包撞掉。"""
+
+    def test_default_base_is_far_from_official(self):
+        # 官方实测最大 90001035（beyond Ave. 世代），且下个更新会继续往后排
+        self.assertGreater(N.DEFAULT_BASE - 90001035, 1000000)
+
+    def test_default_base_not_in_official_pattern(self):
+        self.assertFalse(N.is_official_style_id(N.DEFAULT_BASE))
+
+    def test_official_zone_detected(self):
+        # 官方规律：世代*1000000 + 段内序号（实测 1~1010）
+        for i in (90001035, 90001036, 90000001, 10000001, 11001010,
+                  70000001, 99000000, 99000001):
+            self.assertTrue(N.is_official_style_id(i), "%d 应被判为官方规律区" % i)
+
+    def test_safe_zone_not_flagged(self):
+        # 段内偏移很大的位置才安全
+        for i in (99900000, 99900001, 99990000, 990900000):
+            self.assertFalse(N.is_official_style_id(i),
+                             "%d 不该被判为官方规律区" % i)
+
+    def test_safe_base_moves_official_style(self):
+        for bad in (90001036, 99000000, 90000001):
+            fixed, note = N.safe_base(bad)
+            self.assertEqual(fixed, 99900000)
+            self.assertFalse(N.is_official_style_id(fixed))
+            self.assertIsNotNone(note)
+
+    def test_safe_base_keeps_good_value(self):
+        fixed, note = N.safe_base(99900000)
+        self.assertEqual(fixed, 99900000)
+        self.assertIsNone(note)
+
+    def test_recommend_ids_auto_corrects(self):
+        """即使有人把 base 配成官方规律区，也会自动挪开。"""
+        with mock.patch.object(N, "scan_occupied", return_value={"union": set()}):
+            ids = N.recommend_ids("X", base=90001036, count=3)
+        self.assertEqual(ids, [99900000, 99900001, 99900002])
+        for i in ids:
+            self.assertFalse(N.is_official_style_id(i))
+
+    def test_recommend_ids_skips_occupied(self):
+        occ = {99900000, 99900001}
+        with mock.patch.object(N, "scan_occupied", return_value={"union": occ}):
+            ids = N.recommend_ids("X", base=99900000, count=3)
+        self.assertEqual(ids, [99900002, 99900003, 99900004])
+
+
 class TestBuildNewIfsSlots(unittest.TestCase):
     def _run(self, charts, slot_map, tmpdir, diff=0):
         out = os.path.join(tmpdir, "out.ifs")

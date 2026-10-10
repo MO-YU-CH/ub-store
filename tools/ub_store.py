@@ -381,6 +381,13 @@ def default_config() -> dict:
         # 往下 bit14/13… 是历代版本。想给自制曲单独一档时改这里，需实机重启验证。
         "custom_version_mask": "",
         "custom_grouping_category": "",
+        # 自制谱 music_id 起始段，默认 99900000，**刻意远离官方段**：
+        # 官方 id = 世代*1000000 + 序号（世代 10,11,20,…,90；段内序号实测只到 ~1010），
+        # 且**下个更新包会从 90001036 继续往后排**。老默认值 90001036 紧贴官方尾部，
+        # 一旦装官方更新就会撞 id。
+        # 99900000 是 99 段里 90 万偏移处，官方即便用到 99 段也远远够不到；
+        # 即使这里被改回官方规律区，recommend_ids() 也会自动纠正。
+        "custom_id_base": 99900000,
         # 自制曲的曲名前缀：装完自动把「小曲绘 / 曲名条」注册进分组图集时，
         # 曲名会渲染成「<前缀> <曲名>」以便一眼认出哪些是自制谱。留空 = 不加前缀。
         "custom_title_marker": "[自制]",
@@ -1412,7 +1419,7 @@ def set_game_dir(path: str) -> str:
 def one_click_install(folder: str, game=None, music_id=None, own_audio=True,
                       level=None, reading=None, register_small=True,
                       version_mask=None, grouping_category=None,
-                      progress=None) -> dict:
+                      id_base=None, progress=None) -> dict:
     """把某个已下载目录一键装成游戏新曲。
 
     自动完成：探测游戏目录 / 选空闲 music_id / 用自带音源 / 用下载的封面当曲绘
@@ -1438,7 +1445,13 @@ def one_click_install(folder: str, game=None, music_id=None, own_audio=True,
         grouping_category = (cfg.get("custom_grouping_category") or "").strip() or None
 
     if music_id is None:
-        music_id = N.recommend_ids(game, N.DEFAULT_BASE, 1)[0]
+        # 自制谱 id 段：优先用调用方指定 → 再 config.json 的 custom_id_base
+        # → 最后 N.DEFAULT_BASE。**默认落在 99000000 段**，远离官方更新包会用的
+        # 90001036~ 区间，避免官方更新推高 id 后撞车。
+        base = (id_base
+                or int(cfg.get("custom_id_base") or 0)
+                or N.DEFAULT_BASE)
+        music_id = N.recommend_ids(game, base, 1)[0]
     if not reading:
         reading = default_reading(card.get("title"))
 
