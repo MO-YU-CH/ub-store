@@ -151,16 +151,22 @@ class CardGrid(ttk.Frame):
     """
 
     def __init__(self, master, *, card_w=CARD_W, card_h=CARD_H, cover_size=COVER,
-                 cover_loader=None, on_select=None):
+                 cover_loader=None, on_select=None, multi=False, on_check=None):
         super().__init__(master)
         self.card_w = card_w
         self.card_h = card_h
         self.cover_size = cover_size
         self.cover_loader = cover_loader
         self.on_select = on_select
+        #: 多选模式：卡片左上角出现勾选框，供批量下载/批量卸载使用
+        self.multi = multi
+        #: 勾选状态变化时的回调（用于刷新"批量处理(N)"按钮文字）
+        self.on_check = on_check
         self.cards = []
         self._cols = 0
         self._selected = -1
+        #: 多选模式下已勾选的卡片索引
+        self._checked = set()
 
         self.canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0, bd=0)
         self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
@@ -239,9 +245,15 @@ class CardGrid(ttk.Frame):
                                     bg=C["bg"], fg=C["fg_dim"], font=(UI_FONT, 11))
         self.cards = []
         self._selected = -1
+        self._checked = set()
         self._cols = 0
-        for it in items:
-            self.cards.append(self._make_card(it, footers, badge_of))
+        for i, it in enumerate(items):
+            self.cards.append(self._make_card(it, footers, badge_of, i))
+        if self.on_check:
+            try:
+                self.on_check()
+            except Exception:                                # noqa: BLE001
+                pass
 
         if empty_text and not self.cards:
             self.empty_var.set(empty_text)
@@ -265,10 +277,25 @@ class CardGrid(ttk.Frame):
                     continue
                 self.cover_loader(spec, lambda ph, i=i: self.set_cover(i, ph))
 
-    def _make_card(self, item, footers, badge_of):
+    def _make_card(self, item, footers, badge_of, idx=0):
         f = tk.Frame(self.inner, bg=C["bg2"], width=self.card_w, height=self.card_h,
                      highlightbackground=C["border"], highlightthickness=2)
         f.grid_propagate(False)
+
+        # 多选模式：左上角勾选框（放在封面之上，避免被 cover 的 place 盖住）
+        cb_var = None
+        if self.multi:
+            cb_var = tk.BooleanVar(master=f, value=idx in self._checked)
+            cb = tk.Checkbutton(
+                f, variable=cb_var, bg=C["bg2"], activebackground=C["bg2"],
+                highlightthickness=0, bd=0, cursor="hand2",
+                command=lambda i=idx: self.toggle_check(i))
+            cb.place(x=3, y=3)
+            # holder/cover 是后创建的子控件，会盖住勾选框 → 提到最上层
+            try:
+                cb.lift()
+            except tk.TclError:
+                pass
 
         holder = tk.Frame(f, bg=C["bg3"], width=self.cover_size,
                           height=self.cover_size)
@@ -298,8 +325,8 @@ class CardGrid(ttk.Frame):
         if footers:
             footers(item, footer)
 
-        card = {"frame": f, "cover": cover, "item": item, "photo": None}
-        idx = len(self.cards)
+        card = {"frame": f, "cover": cover, "item": item, "photo": None,
+                "cb_var": cb_var, "idx": idx}
 
         def on_click(_e=None, i=idx):
             self.select(i)
@@ -307,6 +334,74 @@ class CardGrid(ttk.Frame):
         for w in (f, holder, cover, title, artist):
             w.bind("<Button-1>", on_click)
         return card
+
+    # ---- 多选（批量下载 / 批量卸载）----
+    def toggle_check(self, idx):
+        """勾选/取消一张卡片。"""
+        if idx in self._checked:
+            self._checked.discard(idx)
+        else:
+            self._checked.add(idx)
+        card = self.cards[idx] if 0 <= idx < len(self.cards) else None
+        if card and card.get("cb_var") is not None:
+            try:
+                card["cb_var"].set(idx in self._checked)
+            except tk.TclError:
+                pass
+        self._notify_check()
+
+    def checked_indices(self):
+        return sorted(i for i in self._checked if 0 <= i < len(self.cards))
+
+    def checked_items(self):
+        return [self.cards[i]["item"] for i in self.checked_indices()]
+
+    def set_checked(self, indices, value=True):
+        """批量设置勾选状态（索引集合）。"""
+        for i in indices:
+            if value:
+                self._checked.add(i)
+            else:
+                self._checked.discard(i)
+        for i, c in enumerate(self.cards):
+            if c.get("cb_var") is not None:
+                try:
+                    c["cb_var"].set(i in self._checked)
+                except tk.TclError:
+                    pass
+        self._notify_check()
+
+    def check_all(self):
+        self.set_checked(range(len(self.cards)), True)
+
+    def clear_checks(self):
+        self.set_checked(range(len(self.cards)), False)
+
+    def invert_checks(self):
+        """反选：只对"可勾选"的卡片生效（由 skip_check 决定）。"""
+        newset = set()
+        for i, c in enumerate(self.cards):
+            if c.get("cb_var") is None:
+                continue                                 # 该卡片不可勾选，跳过
+            if i not in self._checked:
+                newset.add(i)
+        self.set_checked(range(len(self.cards)), False)
+        for i in newset:
+            self._checked.add(i)
+        for i, c in enumerate(self.cards):
+            if c.get("cb_var") is not None:
+                try:
+                    c["cb_var"].set(i in self._checked)
+                except tk.TclError:
+                    pass
+        self._notify_check()
+
+    def _notify_check(self):
+        if self.on_check:
+            try:
+                self.on_check()
+            except Exception:                                # noqa: BLE001
+                pass
 
     # ---- 选中 / 封面 ----
     def select(self, idx):
@@ -672,10 +767,28 @@ class StoreGUI:
         ttk.Button(top, text="刷新", style="Accent.TButton",
                    command=self.reload_page).pack(side="left", padx=4)
 
+        # ---- 批量操作条 ----
+        bar = ttk.Frame(root)
+        bar.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(bar, text="批量：", style="Dim.TLabel").pack(side="left")
+        ttk.Button(bar, text="全选",
+                   command=lambda: self.browse_grid.check_all()).pack(side="left", padx=2)
+        ttk.Button(bar, text="清空",
+                   command=lambda: self.browse_grid.clear_checks()).pack(side="left", padx=2)
+        ttk.Button(bar, text="反选",
+                   command=lambda: self.browse_grid.invert_checks()).pack(side="left", padx=2)
+        self.btn_batch_download = ttk.Button(
+            bar, text="批量下载(0)", style="Accent.TButton",
+            command=self.batch_download_browse)
+        self.btn_batch_download.pack(side="left", padx=(12, 4))
+        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮；一次拉整页会串行下载，较慢）",
+                  style="Dim.TLabel").pack(side="left", padx=8)
+
         mid = ttk.Frame(root)
         mid.pack(fill="both", expand=True, padx=8)
         self.browse_grid = CardGrid(mid, cover_loader=self.load_cover_spec,
-                                    on_select=self.on_browse_select)
+                                    on_select=self.on_browse_select,
+                                    multi=True, on_check=self._refresh_browse_batch_button)
         self.browse_grid.pack(side="left", fill="both", expand=True)
 
         side = ttk.Frame(mid, style="Card.TFrame", width=252)
@@ -724,9 +837,187 @@ class StoreGUI:
         ttk.Label(top, text="卡片下方【一键安装】装进游戏；已装的可【卸载】。",
                   style="Dim.TLabel").pack(side="left", padx=12)
 
-        self.downloaded_grid = CardGrid(root, cover_loader=self.load_cover_spec,
-                                        on_select=self.on_downloaded_select)
+        # ---- 批量操作条 ----
+        bar = ttk.Frame(root)
+        bar.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(bar, text="批量：", style="Dim.TLabel").pack(side="left")
+        ttk.Button(bar, text="全选",
+                   command=lambda: self._dl_grid().check_all()).pack(side="left", padx=2)
+        ttk.Button(bar, text="清空",
+                   command=lambda: self._dl_grid().clear_checks()).pack(side="left", padx=2)
+        ttk.Button(bar, text="反选",
+                   command=lambda: self._dl_grid().invert_checks()).pack(side="left", padx=2)
+        self.btn_batch_install = ttk.Button(
+            bar, text="批量安装(0)", style="Accent.TButton",
+            command=self.batch_install_downloaded)
+        self.btn_batch_install.pack(side="left", padx=(12, 4))
+        self.btn_batch_uninstall = ttk.Button(
+            bar, text="批量卸载(0)", command=self.batch_uninstall_downloaded)
+        self.btn_batch_uninstall.pack(side="left", padx=4)
+        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮）",
+                  style="Dim.TLabel").pack(side="left", padx=8)
+
+        self.downloaded_grid = CardGrid(
+            root, cover_loader=self.load_cover_spec,
+            on_select=self.on_downloaded_select,
+            multi=True, on_check=self._refresh_downloaded_batch_buttons)
         self.downloaded_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _dl_grid(self):
+        return self.downloaded_grid
+
+    def _refresh_downloaded_batch_buttons(self):
+        """勾选变化时更新批量按钮上的数量。"""
+        try:
+            n = len(self.downloaded_grid.checked_items())
+        except Exception:                                    # noqa: BLE001
+            n = 0
+        for btn, label in ((self.btn_batch_install, "批量安装"),
+                           (self.btn_batch_uninstall, "批量卸载")):
+            try:
+                btn.configure(text="%s(%d)" % (label, n))
+            except Exception:                                # noqa: BLE001
+                pass
+
+    # ---- 批量安装（已下载 -> 游戏）----
+    def batch_install_downloaded(self):
+        items = self.downloaded_grid.checked_items()
+        if not items:
+            messagebox.showinfo("提示", "请先勾选要安装的谱面（卡片左上角方框）。")
+            return
+        titles = [it.get("title") or os.path.basename(it.get("dir") or "?")
+                  for it in items]
+        head = "、".join(titles[:5]) + ("…" if len(titles) > 5 else "")
+        if not messagebox.askyesno(
+                "批量安装",
+                "将安装 %d 个谱面：\n  %s\n\n"
+                "  · 逐个安装，自动选空闲 id、只新增不覆盖\n"
+                "  · 每个谱面编码音源约需十秒\n\n确定继续？" % (len(items), head)):
+            return
+        self.set_status("开始批量安装 %d 个…" % len(items))
+        self.progress.configure(value=0, maximum=len(items))
+
+        def work():
+            ok, fail = [], []
+            for i, it in enumerate(items, 1):
+                name = it.get("title") or os.path.basename(it.get("dir") or "?")
+                folder = it.get("dir")
+                if not folder:
+                    fail.append((name, "缺少下载目录信息"))
+                    continue
+                self.async_.q.put((self.set_status,
+                                   ("批量安装 %d/%d：%s"
+                                    % (i, len(items), name),), {}))
+                self.async_.q.put((self.progress.configure, (), {"value": i - 1}))
+
+                def prog(_i, msg, _n=name):
+                    self.async_.q.put((self.set_status, ("%s：%s" % (_n, msg),), {}))
+                try:
+                    res = S.one_click_install(folder, progress=prog)
+                    mid = ((res or {}).get("plan") or {}).get("music_id")
+                    ok.append((name, mid))
+                except Exception as ex:                      # noqa: BLE001
+                    fail.append((name, str(ex)))
+            return {"ok": ok, "fail": fail}
+
+        def done(res):
+            self.progress.configure(value=len(items))
+            ok, fail = res["ok"], res["fail"]
+            self.set_status("批量安装完成：成功 %d，失败 %d" % (len(ok), len(fail)))
+            lines = []
+            if ok:
+                lines.append("成功 %d 个：" % len(ok))
+                for n, mid in ok:
+                    lines.append("   · %s  →  music_id=%s" % (n, mid))
+            if fail:
+                lines.append("")
+                lines.append("失败 %d 个：" % len(fail))
+                for n, e in fail[:12]:
+                    lines.append("   · %s：%s" % (n, str(e)[:80]))
+                if len(fail) > 12:
+                    lines.append("   … 还有 %d 个" % (len(fail) - 12))
+            messagebox.showinfo("批量安装完成", "\n".join(lines))
+            self.reload_downloaded()
+            try:
+                self.reload_installed()
+            except Exception:                                # noqa: BLE001
+                pass
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("批量安装失败", str(e)),
+                                   self.set_status("批量安装失败：%s" % e)))
+
+    # ---- 批量卸载 ----
+    def batch_uninstall_downloaded(self):
+        items = self.downloaded_grid.checked_items()
+        if not items:
+            messagebox.showinfo("提示", "请先勾选要卸载的谱面（卡片左上角方框）。")
+            return
+        pairs = [(it.get("installed_music_id"),
+                  it.get("title") or os.path.basename(it.get("dir") or "?"))
+                 for it in items]
+        todo = [(mid, name) for mid, name in pairs if mid]
+        skipped = [name for mid, name in pairs if not mid]
+        if not todo:
+            messagebox.showinfo("提示",
+                                "勾选的谱面里没有已装进游戏的（%d 个未安装）。"
+                                % len(skipped))
+            return
+        if not messagebox.askyesno(
+                "批量卸载",
+                "将从游戏里卸载 %d 个自制谱：\n  %s\n\n"
+                "（另有 %d 个未安装，会跳过）\n\n"
+                "卸载会按安装记录逐项回滚，确定继续？"
+                % (len(todo), "、".join(n for _, n in todo[:5])
+                   + ("…" if len(todo) > 5 else ""), len(skipped))):
+            return
+        self._run_batch_uninstall(todo)
+
+    def _run_batch_uninstall(self, todo):
+        """todo = [(music_id, 名称), ...]"""
+        self.set_status("开始批量卸载 %d 个…" % len(todo))
+        self.progress.configure(value=0, maximum=len(todo))
+
+        def work():
+            ok, fail = [], []
+            for i, (mid, name) in enumerate(todo, 1):
+                self.async_.q.put((self.set_status,
+                                   ("批量卸载 %d/%d：%s" % (i, len(todo), name),), {}))
+                self.async_.q.put((self.progress.configure, (), {"value": i - 1}))
+                try:
+                    S.uninstall_music(mid)
+                    ok.append((name, mid))
+                except Exception as ex:                      # noqa: BLE001
+                    fail.append((name, str(ex)))
+            return {"ok": ok, "fail": fail}
+
+        def done(res):
+            self.progress.configure(value=len(todo))
+            ok, fail = res["ok"], res["fail"]
+            self.set_status("批量卸载完成：成功 %d，失败 %d" % (len(ok), len(fail)))
+            lines = []
+            if ok:
+                lines.append("成功 %d 个：" % len(ok))
+                for n, mid in ok:
+                    lines.append("   · %s  (id=%s)" % (n, mid))
+            if fail:
+                lines.append("")
+                lines.append("失败 %d 个：" % len(fail))
+                for n, e in fail[:12]:
+                    lines.append("   · %s：%s" % (n, str(e)[:80]))
+            messagebox.showinfo("批量卸载完成", "\n".join(lines))
+            try:
+                self.reload_downloaded()
+            except Exception:                                # noqa: BLE001
+                pass
+            try:
+                self.reload_installed()
+            except Exception:                                # noqa: BLE001
+                pass
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("批量卸载失败", str(e)),
+                                   self.set_status("批量卸载失败：%s" % e)))
 
     # ===================== 已装自制谱（卡片网格） =====================
     def _build_installed(self, root):
@@ -742,9 +1033,60 @@ class StoreGUI:
         ttk.Entry(top, textvariable=self.var_data_dir, width=40,
                   state="readonly").pack(side="left")
 
-        self.installed_grid = CardGrid(root, cover_loader=self.load_cover_spec,
-                                       on_select=self.on_installed_select)
+        # ---- 批量操作条 ----
+        bar = ttk.Frame(root)
+        bar.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(bar, text="批量：", style="Dim.TLabel").pack(side="left")
+        ttk.Button(bar, text="全选",
+                   command=lambda: self.installed_grid.check_all()).pack(side="left", padx=2)
+        ttk.Button(bar, text="清空",
+                   command=lambda: self.installed_grid.clear_checks()).pack(side="left", padx=2)
+        ttk.Button(bar, text="反选",
+                   command=lambda: self.installed_grid.invert_checks()).pack(side="left", padx=2)
+        self.btn_batch_uninstall_all = ttk.Button(
+            bar, text="批量卸载(0)", style="Accent.TButton",
+            command=self.batch_uninstall_installed)
+        self.btn_batch_uninstall_all.pack(side="left", padx=(12, 4))
+        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮）",
+                  style="Dim.TLabel").pack(side="left", padx=8)
+
+        self.installed_grid = CardGrid(
+            root, cover_loader=self.load_cover_spec,
+            on_select=self.on_installed_select,
+            multi=True, on_check=self._refresh_installed_batch_button)
         self.installed_grid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _refresh_installed_batch_button(self):
+        try:
+            n = len(self.installed_grid.checked_items())
+        except Exception:                                    # noqa: BLE001
+            n = 0
+        try:
+            self.btn_batch_uninstall_all.configure(text="批量卸载(%d)" % n)
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def batch_uninstall_installed(self):
+        items = self.installed_grid.checked_items()
+        if not items:
+            messagebox.showinfo("提示", "请先勾选要卸载的谱面（卡片左上角方框）。")
+            return
+        todo = []
+        for it in items:
+            mid = it.get("music_id") or it.get("installed_music_id") or it.get("mid")
+            if mid:
+                todo.append((mid, it.get("title") or ("id=%s" % mid)))
+        if not todo:
+            messagebox.showinfo("提示", "勾选的条目里没有可卸载的 music_id。")
+            return
+        if not messagebox.askyesno(
+                "批量卸载",
+                "将从游戏里卸载 %d 个自制谱：\n  %s\n\n"
+                "卸载会按安装记录逐项回滚（曲表 / 包表 / 文件），确定继续？"
+                % (len(todo), "、".join(n for _, n in todo[:5])
+                   + ("…" if len(todo) > 5 else ""))):
+            return
+        self._run_batch_uninstall(todo)
 
     # ===================== 登录 =====================
     def _build_account(self, root):
@@ -1067,6 +1409,101 @@ class StoreGUI:
             self.set_status("下载失败：%s" % e)
 
         self.async_.run(work, done, err)
+
+    # ---- 批量下载（谱库浏览 -> 本地）----
+    def _refresh_browse_batch_button(self):
+        try:
+            n = len(self.browse_grid.checked_items())
+        except Exception:                                    # noqa: BLE001
+            n = 0
+        try:
+            self.btn_batch_download.configure(text="批量下载(%d)" % n)
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def batch_download_browse(self):
+        items = self.browse_grid.checked_items()
+        if not items:
+            messagebox.showinfo("提示", "请先勾选要下载的谱面（卡片左上角方框）。")
+            return
+        if not S.is_logged_in():
+            if not messagebox.askyesno(
+                    "需要登录",
+                    "批量下载需要登录（游客身份会返回 code=-3 无权限）。\n现在去【登录】页登录？"):
+                return
+            self.notebook.select(self.tab_account)
+            return
+        titles = [it.get("title") or ("id=%s" % (it.get("cid") or it.get("id")))
+                  for it in items]
+        if not messagebox.askyesno(
+                "批量下载",
+                "将下载 %d 个谱面：\n  %s\n\n"
+                "  · 逐个串行下载，会先挑谱面（优先 EXT）再拉文件\n"
+                "  · 商店条目需要多一次接口调用，整批会偏慢\n\n确定继续？"
+                % (len(items), "、".join(titles[:5]) + ("…" if len(titles) > 5 else ""))):
+            return
+        self.set_status("开始批量下载 %d 个…" % len(items))
+        self.progress.configure(value=0, maximum=len(items))
+
+        def work():
+            ok, fail = [], []
+            for i, it in enumerate(items, 1):
+                name = it.get("title") or ("id=%s" % (it.get("cid") or it.get("id")))
+                # 商店条目只有 sid，匿名条目 id 才是 cid
+                sid = it.get("sid")
+                cid = it.get("cid") or (None if sid else it.get("id"))
+                self.async_.q.put((self.set_status,
+                                   ("批量下载 %d/%d：%s"
+                                    % (i, len(items), name),), {}))
+                try:
+                    if cid is None:
+                        if not sid:
+                            raise S.StoreError(-2, "该条目既没有 cid 也没有 sid")
+                        resolved = self.client.pick_cid(sid)
+                        use_cid = (resolved or {}).get("cid")
+                    else:
+                        use_cid = cid
+
+                    def prog(_i, _n, _nm, _nm2=name):
+                        self.async_.q.put((self.set_status,
+                                           ("%s：%s" % (_nm2, _nm),), {}))
+                    res = self.client.download_chart(use_cid, progress=prog)
+                    ok.append((name, res.get("dir")))
+                except Exception as ex:                      # noqa: BLE001
+                    detail = getattr(ex, "detail", "") or ""
+                    fail.append((name, ("%s %s" % (ex, detail)).strip()))
+                self.async_.q.put((self.progress.configure, (), {"value": i}))
+            return {"ok": ok, "fail": fail}
+
+        def done(res):
+            self.progress.configure(value=len(items))
+            ok, fail = res["ok"], res["fail"]
+            self.set_status("批量下载完成：成功 %d，失败 %d" % (len(ok), len(fail)))
+            lines = []
+            if ok:
+                lines.append("成功 %d 个：" % len(ok))
+                for n, d in ok[:12]:
+                    lines.append("   · %s  →  %s" % (n, d))
+                if len(ok) > 12:
+                    lines.append("   … 还有 %d 个" % (len(ok) - 12))
+            if fail:
+                lines.append("")
+                lines.append("失败 %d 个：" % len(fail))
+                for n, e in fail[:12]:
+                    lines.append("   · %s：%s" % (n, str(e)[:90]))
+                if len(fail) > 12:
+                    lines.append("   … 还有 %d 个" % (len(fail) - 12))
+            lines.append("")
+            lines.append("可到【已下载】页批量安装。")
+            messagebox.showinfo("批量下载完成", "\n".join(lines))
+            try:
+                self.reload_downloaded()
+            except Exception:                                # noqa: BLE001
+                pass
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("批量下载失败", str(e)),
+                                   self.set_status("批量下载失败：%s" % e)))
 
     # ---- 已下载页行为 ----
     def on_downloaded_select(self, item, _idx=None):

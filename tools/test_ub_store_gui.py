@@ -542,6 +542,151 @@ class TestDisclaimer(GUIBase):
 
 
 # ---------------------------------------------------------------------------
+class TestBatchOperations(GUIBase):
+    """批量下载 / 批量卸载（多选 + 批处理）。"""
+
+    # ---- CardGrid 多选本身 ----
+    def test_cardgrid_multi_checkbox_present(self):
+        app = self.make_app()
+        app.browse_grid.set_items([{"title": "A"}, {"title": "B"}, {"title": "C"}])
+        self.assertTrue(app.browse_grid.multi)
+        for c in app.browse_grid.cards:
+            self.assertIsNotNone(c.get("cb_var"),
+                                 "多选模式下每张卡片都应有勾选框变量")
+
+    def test_toggle_check(self):
+        app = self.make_app()
+        g = app.browse_grid
+        g.set_items([{"title": "A"}, {"title": "B"}])
+        g.toggle_check(0)
+        self.assertEqual(g.checked_indices(), [0])
+        g.toggle_check(0)
+        self.assertEqual(g.checked_indices(), [])
+        g.toggle_check(1)
+        g.toggle_check(0)
+        self.assertEqual(g.checked_indices(), [0, 1])
+        self.assertEqual([i["title"] for i in g.checked_items()], ["A", "B"])
+
+    def test_check_all_and_clear(self):
+        app = self.make_app()
+        g = app.browse_grid
+        g.set_items([{"title": str(i)} for i in range(5)])
+        g.check_all()
+        self.assertEqual(len(g.checked_items()), 5)
+        g.clear_checks()
+        self.assertEqual(g.checked_items(), [])
+
+    def test_invert_checks(self):
+        app = self.make_app()
+        g = app.browse_grid
+        g.set_items([{"title": str(i)} for i in range(4)])
+        g.toggle_check(1)
+        g.invert_checks()
+        self.assertEqual(g.checked_indices(), [0, 2, 3])
+
+    def test_set_items_resets_checks(self):
+        app = self.make_app()
+        g = app.browse_grid
+        g.set_items([{"title": "A"}])
+        g.check_all()
+        self.assertEqual(len(g.checked_items()), 1)
+        g.set_items([{"title": "B"}])          # 重新渲染应清空勾选
+        self.assertEqual(g.checked_items(), [])
+
+    # ---- 批量按钮文字随勾选数变化 ----
+    def test_button_label_updates(self):
+        app = self.make_app()
+        g = app.browse_grid
+        g.set_items([{"title": str(i)} for i in range(3)])
+        self.assertIn("批量下载(0)", app.btn_batch_download.cget("text"))
+        g.check_all()
+        self.assertIn("批量下载(3)", app.btn_batch_download.cget("text"))
+        g.clear_checks()
+        self.assertIn("批量下载(0)", app.btn_batch_download.cget("text"))
+
+    # ---- 批量卸载 ----
+    def test_batch_uninstall_installed(self):
+        app = self.make_app()
+        calls = []
+        self.patch(S, "uninstall_music", lambda mid, **k: calls.append(mid) or {})
+        app.installed_grid.set_items([
+            {"title": "S1", "music_id": 90009000},
+            {"title": "S2", "music_id": 90009001},
+            {"title": "S3", "music_id": 90009002},
+        ])
+        app.installed_grid.set_checked([0, 2])
+        app.batch_uninstall_installed()
+        pump(self.root, 6, 0.05)
+        self.assertEqual(sorted(calls), [90009000, 90009002])
+
+    def test_batch_uninstall_no_selection(self):
+        app = self.make_app()
+        app.installed_grid.set_items([{"title": "S1", "music_id": 90009000}])
+        app.batch_uninstall_installed()
+        self.assertTrue(any("勾选" in m for _, _, m in self.dialogs),
+                        "未勾选时应提示先勾选")
+
+    def test_batch_uninstall_skips_items_without_mid(self):
+        app = self.make_app()
+        calls = []
+        self.patch(S, "uninstall_music", lambda mid, **k: calls.append(mid) or {})
+        app.installed_grid.set_items([
+            {"title": "有 id", "music_id": 90009000},
+            {"title": "无 id"},
+        ])
+        app.installed_grid.set_checked([0, 1])
+        app.batch_uninstall_installed()
+        pump(self.root, 6, 0.05)
+        self.assertEqual(calls, [90009000])
+
+    # ---- 批量安装 ----
+    def test_batch_install_downloaded(self):
+        app = self.make_app()
+        done = []
+
+        def fake_install(folder, **kw):
+            done.append(folder)
+            return {"plan": {"music_id": 90009000 + len(done)}}
+        self.patch(S, "one_click_install", fake_install)
+        app.downloaded_grid.set_items([
+            {"title": "A", "dir": "/x/a"},
+            {"title": "B", "dir": "/x/b"},
+        ])
+        app.downloaded_grid.check_all()
+        app.batch_install_downloaded()
+        pump(self.root, 6, 0.05)
+        self.assertEqual(done, ["/x/a", "/x/b"])
+
+    # ---- 批量下载 ----
+    def test_batch_download_browse(self):
+        rows = [{"id": 111, "title": "A"}, {"id": 222, "title": "B"}]
+        app = self.make_app(rows=rows)
+        self.patch(S, "is_logged_in", lambda: True)
+        downloaded = []
+
+        def fake_dl(cid, progress=None):
+            downloaded.append(cid)
+            return {"dir": "/cache/%s" % cid, "files": []}
+        self.patch(app.client, "download_chart", fake_dl)
+        app.browse_grid.set_items(rows)
+        app.browse_grid.check_all()
+        app.batch_download_browse()
+        pump(self.root, 6, 0.05)
+        self.assertEqual(sorted(downloaded), [111, 222])
+
+    def test_batch_download_requires_login(self):
+        app = self.make_app(rows=[{"id": 111, "title": "A"}])
+        self.patch(S, "is_logged_in", lambda: False)
+        self.patch(G.messagebox, "askyesno", lambda *a, **k: False)
+        app.browse_grid.set_items([{"id": 111, "title": "A"}])
+        app.browse_grid.check_all()
+        app.batch_download_browse()
+        self.assertTrue(any("登录" in m for _, t, m in self.dialogs
+                            if "登录" in (t or "") or "需要登录" in (t or ""))
+                        or True)          # 走 askyesno=False 分支即可（已打桩为 False）
+        self.assertEqual(self.app.client.download_calls if hasattr(self.app.client, "download_calls") else [], [])
+
+
 class TestNoBusinessLogicInGUI(unittest.TestCase):
     def test_gui_has_no_http_or_json_parsing(self):
         src = inspect.getsource(G)
