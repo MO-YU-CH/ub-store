@@ -67,19 +67,24 @@ except Exception:              # pragma: no cover
 # ---------------------------------------------------------------------------
 # 自制谱 music_id 分配区间
 # ---------------------------------------------------------------------------
-# 官方 id 规律实测：`<两位世代> <6 位序号>`，即 id = 世代*1000000 + 序号
+# 官方 id 规律实测：id = 世代*1000000 + 段内序号
 #   10000036 / 11000001 / 20000002 / 50000021 / 90001035
-# 世代取 10,11,20,30,…,90；**每段序号只用到 1~1010**（约千首）。
-# 官方下个更新包会从 90001036 继续往后排，所以自制谱不能贴官方尾部。
+# 世代取 10,11,20,30,…,90；**当前世代(90) 的段内序号只用到 1~1035**。
 #
-# ⇒ 自制段选 **99 段的 90 万偏移** 处：99900000。
-#    即使官方将来用到 99 段，它也只占到 99 0 01010 左右，
-#    离 99 900000 还差 89 万个位置；按每版千首算要近千个版本才可能追上。
-DEFAULT_BASE = 99900000
+# 🔴 血泪教训（2026-10-10）：曾经把自制谱挪到 **99900000**（99 段），
+#    结果游戏登录时 **`W:EXCEPTION: avs-sort.c` 刷屏 24070 次后闪退**。
+#    ⇒ **游戏不接受"跨世代段"的 id**，自制谱必须留在官方当前世代段(90)内。
+#
+# ⇒ 自制段取 **90009000**：仍在 90 段内（段号合法），但段内偏移 9000
+#    远离官方已用的 1~1035，官方要再涨约 8000 首才会追上。
+DEFAULT_BASE = 90009000
+#: 自制谱必须落在的世代段（官方当前世代 = 90）
+CUSTOM_SEGMENT = 90
 #: 官方 id 的已知上界（仅作参考/日志用，不参与分配决策）
 OFFICIAL_ID_HINT_MAX = 90001035
-#: 官方"世代段"里被视为"会被官方占用"的段内偏移上限（实测约 1010，留足余量）
-OFFICIAL_SEQ_LIMIT = 100000
+#: 段内偏移小于此值 = 属于"官方编号规律区"，会被官方将来占用。
+#: 官方实测只用到 1035，这里留近一倍余量。
+OFFICIAL_SEQ_LIMIT = 2000
 DEFAULT_LEVEL = 1              # 自制谱定数固定 1（用户 2026-10-10 定；Malody meta 无 level）
 MUSIC_BLOCK_RE = re.compile(r'<data __type="void" id="\d+">.*?</data>', re.S)
 MID_RE = re.compile(r'<music_id __type="s32">(\d+)</music_id>')
@@ -222,27 +227,47 @@ def check_id_free(game: str, music_id: int):
 
 
 def is_official_style_id(music_id: int) -> bool:
-    """判断这个 id 是否落在官方的"世代段"编号规律内。
+    """判断这个 id 是否落在官方的"编号规律区"（会被官方将来占用）。
 
-    官方 id = ``世代*1000000 + 序号``，世代取 10,11,20,…,90，
-    段内序号实测只用到 1~1010。所以**段内偏移小于 OFFICIAL_SEQ_LIMIT 的，
-    基本都会被官方将来用掉**。
+    官方 id = ``世代*1000000 + 段内序号``，当前世代(90) 的序号实测只用到 1035。
+    因此**段内偏移小于 OFFICIAL_SEQ_LIMIT 的，基本都会被官方用掉**。
     """
-    return (music_id < 100000000
-            and (music_id % 1000000) < OFFICIAL_SEQ_LIMIT)
+    return (music_id % 1000000) < OFFICIAL_SEQ_LIMIT
+
+
+def id_problem(music_id: int):
+    """检查一个自制谱 music_id 是否可用，返回问题描述（可用则 None）。
+
+    两条硬规则（都来自实机事故）：
+      1. **必须留在官方当前世代段**（``CUSTOM_SEGMENT``=90）。
+         跨段会被游戏拒绝 —— 实测 **99900000（99 段）导致登录闪退**。
+      2. **段内偏移要够大**（>= ``OFFICIAL_SEQ_LIMIT``），否则迟早和官方新曲撞号。
+         紧贴官方尾部的 90001036 就属于这种"暂时的安全"。
+    """
+    if music_id < 0:
+        return "id 不能为负"
+    seg, off = divmod(music_id, 1000000)
+    if seg != CUSTOM_SEGMENT:
+        return ("id %d 落在 %d 段；自制谱必须留在 %d 段（跨段会导致游戏闪退）"
+                % (music_id, seg, CUSTOM_SEGMENT))
+    if off < OFFICIAL_SEQ_LIMIT:
+        return ("id %d 的段内偏移 %d 太小（官方已用到 %d），容易和官方更新撞号"
+                % (music_id, off, OFFICIAL_ID_HINT_MAX % 1000000))
+    return None
 
 
 def safe_base(base: int) -> tuple:
     """把自制 id 起点规整到安全位置。返回 (调整后的 base, 说明)。
 
-    例如 90001036（紧贴官方尾部）或 99000000（99 段起点）都会被挪到
-    **99900000**——99 段里足够靠后的偏移，官方即便用到 99 段也远远够不到。
+    任何"不合格"的起点都会被挪到 ``DEFAULT_BASE``（90009000）：
+      * 跨段的（如 99900000 / 99000000）—— 会让游戏闪退
+      * 段内偏移太小的（如 90001036）—— 迟早和官方新曲撞号
     """
-    if not is_official_style_id(base):
+    prob = id_problem(base)
+    if prob is None:
         return base, None
-    fixed = DEFAULT_BASE
-    return fixed, ("自制 id 起点 %d 落在官方编号规律内（官方按 世代*1000000+序号 "
-                   "从低位往后占用），已自动调整到 %d" % (base, fixed))
+    return DEFAULT_BASE, ("自制 id 起点 %d 不可用（%s），已自动调整到 %d"
+                          % (base, prob, DEFAULT_BASE))
 
 
 def recommend_ids(game: str, base: int = DEFAULT_BASE, count: int = 5):

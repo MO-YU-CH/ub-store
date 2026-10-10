@@ -151,52 +151,83 @@ class TestDefaultLevel(unittest.TestCase):
 # build_new_ifs 的分档写入
 # --------------------------------------------------------------------------
 class TestIdBaseSafety(unittest.TestCase):
-    """自制谱 id 段必须远离官方编号规律，否则会被后续官方更新包撞掉。"""
+    """自制谱 id 必须留在官方当前世代段(90)内、且段内偏移够大。
 
-    def test_default_base_is_far_from_official(self):
-        # 官方实测最大 90001035（beyond Ave. 世代），且下个更新会继续往后排
-        self.assertGreater(N.DEFAULT_BASE - 90001035, 1000000)
+    两条规则都来自 2026-10-10 的实机事故：
+      · 跨段（99900000）→ 游戏登录闪退（W:EXCEPTION: avs-sort.c 刷屏）
+      · 贴官方尾部（90001036）→ 迟早被官方更新撞号
+    """
 
-    def test_default_base_not_in_official_pattern(self):
-        self.assertFalse(N.is_official_style_id(N.DEFAULT_BASE))
+    def test_default_base_in_custom_segment(self):
+        seg = N.DEFAULT_BASE // 1000000
+        self.assertEqual(seg, N.CUSTOM_SEGMENT,
+                         "自制段必须在 %d 段内" % N.CUSTOM_SEGMENT)
 
-    def test_official_zone_detected(self):
-        # 官方规律：世代*1000000 + 段内序号（实测 1~1010）
-        for i in (90001035, 90001036, 90000001, 10000001, 11001010,
-                  70000001, 99000000, 99000001):
-            self.assertTrue(N.is_official_style_id(i), "%d 应被判为官方规律区" % i)
+    def test_default_base_offset_big_enough(self):
+        off = N.DEFAULT_BASE % 1000000
+        self.assertGreaterEqual(off, N.OFFICIAL_SEQ_LIMIT)
+        # 且离官方已用到的序号要拉开距离
+        self.assertGreater(off - (N.OFFICIAL_ID_HINT_MAX % 1000000), 5000)
 
-    def test_safe_zone_not_flagged(self):
-        # 段内偏移很大的位置才安全
-        for i in (99900000, 99900001, 99990000, 990900000):
-            self.assertFalse(N.is_official_style_id(i),
-                             "%d 不该被判为官方规律区" % i)
+    def test_default_base_starts_with_90009(self):
+        """用户指定的格式：90009xxx"""
+        self.assertEqual(N.DEFAULT_BASE, 90009000)
 
-    def test_safe_base_moves_official_style(self):
-        for bad in (90001036, 99000000, 90000001):
+    def test_default_base_is_valid(self):
+        self.assertIsNone(N.id_problem(N.DEFAULT_BASE))
+
+    # ---- id_problem：跨段必须被判为不可用 ----
+    def test_cross_segment_rejected(self):
+        # 99900000（99 段）正是导致闪退的那个值
+        for bad in (99900000, 99900001, 99000000, 91000000, 80009000):
+            prob = N.id_problem(bad)
+            self.assertIsNotNone(prob, "%d 跨段应被拒绝" % bad)
+            self.assertIn("段", prob)
+
+    def test_too_close_to_official_rejected(self):
+        for bad in (90001036, 90001000, 90000001, 90001999):
+            prob = N.id_problem(bad)
+            self.assertIsNotNone(prob, "%d 偏移太小应被拒绝" % bad)
+
+    def test_good_ids_accepted(self):
+        for good in (90009000, 90009001, 90009999, 90010000, 90020000):
+            self.assertIsNone(N.id_problem(good), "%d 应该是可用的" % good)
+
+    def test_negative_rejected(self):
+        self.assertIsNotNone(N.id_problem(-1))
+
+    # ---- safe_base：不合格的起点自动纠正 ----
+    def test_safe_base_fixes_cross_segment(self):
+        for bad in (99900000, 99000000, 91000000):
             fixed, note = N.safe_base(bad)
-            self.assertEqual(fixed, 99900000)
-            self.assertFalse(N.is_official_style_id(fixed))
+            self.assertEqual(fixed, 90009000)
             self.assertIsNotNone(note)
+            self.assertIsNone(N.id_problem(fixed))
+
+    def test_safe_base_fixes_official_tail(self):
+        fixed, note = N.safe_base(90001036)
+        self.assertEqual(fixed, 90009000)
+        self.assertIsNotNone(note)
 
     def test_safe_base_keeps_good_value(self):
-        fixed, note = N.safe_base(99900000)
-        self.assertEqual(fixed, 99900000)
+        fixed, note = N.safe_base(90009000)
+        self.assertEqual(fixed, 90009000)
         self.assertIsNone(note)
 
+    # ---- recommend_ids ----
     def test_recommend_ids_auto_corrects(self):
-        """即使有人把 base 配成官方规律区，也会自动挪开。"""
+        """即使 base 配成跨段的值，也会被挪到安全区。"""
         with mock.patch.object(N, "scan_occupied", return_value={"union": set()}):
-            ids = N.recommend_ids("X", base=90001036, count=3)
-        self.assertEqual(ids, [99900000, 99900001, 99900002])
+            ids = N.recommend_ids("X", base=99900000, count=3)
+        self.assertEqual(ids, [90009000, 90009001, 90009002])
         for i in ids:
-            self.assertFalse(N.is_official_style_id(i))
+            self.assertIsNone(N.id_problem(i))
 
     def test_recommend_ids_skips_occupied(self):
-        occ = {99900000, 99900001}
+        occ = {90009000, 90009001}
         with mock.patch.object(N, "scan_occupied", return_value={"union": occ}):
-            ids = N.recommend_ids("X", base=99900000, count=3)
-        self.assertEqual(ids, [99900002, 99900003, 99900004])
+            ids = N.recommend_ids("X", base=90009000, count=3)
+        self.assertEqual(ids, [90009002, 90009003, 90009004])
 
 
 class TestBuildNewIfsSlots(unittest.TestCase):

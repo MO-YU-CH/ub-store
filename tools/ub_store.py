@@ -381,13 +381,15 @@ def default_config() -> dict:
         # 往下 bit14/13… 是历代版本。想给自制曲单独一档时改这里，需实机重启验证。
         "custom_version_mask": "",
         "custom_grouping_category": "",
-        # 自制谱 music_id 起始段，默认 99900000，**刻意远离官方段**：
-        # 官方 id = 世代*1000000 + 序号（世代 10,11,20,…,90；段内序号实测只到 ~1010），
-        # 且**下个更新包会从 90001036 继续往后排**。老默认值 90001036 紧贴官方尾部，
-        # 一旦装官方更新就会撞 id。
-        # 99900000 是 99 段里 90 万偏移处，官方即便用到 99 段也远远够不到；
-        # 即使这里被改回官方规律区，recommend_ids() 也会自动纠正。
-        "custom_id_base": 99900000,
+        # 自制谱 music_id 起始段，默认 **90009000**。
+        # 规则（来自 2026-10-10 实机事故，改动务必谨慎）：
+        #   官方 id = 世代*1000000 + 段内序号，当前世代 90 用到的序号只到 1035。
+        #   ① **必须留在 90 段内**：曾经挪到 99900000（99 段），
+        #      结果游戏登录时 W:EXCEPTION: avs-sort.c 刷屏 24070 次后闪退。
+        #   ② **段内偏移要够大**：紧跟官方尾部的 90001036 迟早被官方新曲撞号。
+        #   90009000 同时满足：段号=90，偏移=9000（离官方 1035 很远）。
+        # 非法值会被 ub_newsong.safe_base() 自动纠正，不必担心改错。
+        "custom_id_base": 90009000,
         # 自制曲的曲名前缀：装完自动把「小曲绘 / 曲名条」注册进分组图集时，
         # 曲名会渲染成「<前缀> <曲名>」以便一眼认出哪些是自制谱。留空 = 不加前缀。
         "custom_title_marker": "[自制]",
@@ -1446,12 +1448,17 @@ def one_click_install(folder: str, game=None, music_id=None, own_audio=True,
 
     if music_id is None:
         # 自制谱 id 段：优先用调用方指定 → 再 config.json 的 custom_id_base
-        # → 最后 N.DEFAULT_BASE。**默认落在 99000000 段**，远离官方更新包会用的
-        # 90001036~ 区间，避免官方更新推高 id 后撞车。
+        # → 最后 N.DEFAULT_BASE。默认 90009000（90 段内、偏移够大）。
+        # 非法起点会被 recommend_ids() 内的 safe_base() 自动纠正。
         base = (id_base
                 or int(cfg.get("custom_id_base") or 0)
                 or N.DEFAULT_BASE)
         music_id = N.recommend_ids(game, base, 1)[0]
+    else:
+        # 手动指定时也要校验：跨段会让游戏闪退，贴官方尾部会撞号
+        prob = N.id_problem(music_id)
+        if prob:
+            raise StoreError(-1, "指定的 music_id 不可用：%s" % prob)
     if not reading:
         reading = default_reading(card.get("title"))
 
