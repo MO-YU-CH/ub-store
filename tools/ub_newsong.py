@@ -622,7 +622,11 @@ def build_new_ifs(src_ifs: str, mcz: str, diff: int, slots,
         if not (0 <= d < len(charts)):
             raise ValueError("slot_map 指向越界的难度下标：%d（共 %d 个）"
                              % (d, len(charts)))
-        return UC.chart_to_eve(charts[d], hold_policy=hold_policy)
+        # ★ 必须应用 Malody 的 bgm_offset：谱面 meta 里的音源偏移表示
+        #   "音频相对第 0 拍的起始位置"，不应用的话音符会比音乐晚一截
+        #   （用户反馈"音乐开始太早 / 谱面对不上"就是这个原因）。
+        return UC.chart_to_eve(charts[d], hold_policy=hold_policy,
+                               apply_bgm_offset=True)
 
     c = UC.MiscIfs(path=src_ifs)
     src_audio = {m.name: hashlib.md5(m.data).hexdigest() for m in c.audio_members()}

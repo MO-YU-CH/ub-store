@@ -219,6 +219,19 @@ def _luma(r, g, b):
     return (r * 299 + g * 587 + b * 114) // 1000
 
 
+#: fmt=0x10/0x20 的通道序开关。
+#: 实测结论：**按 RGBA 原样写**才正确（与底层 encode_pixels 一致）。
+#: 若哪天发现需要 R/B 交换，设环境变量 UB_TEX_SWAP_RB=1 即可全局切换。
+_SWAP_RB = None
+
+
+def _swap_rb() -> bool:
+    global _SWAP_RB
+    if _SWAP_RB is None:
+        _SWAP_RB = os.environ.get('UB_TEX_SWAP_RB', '').strip() in ('1', 'true', 'yes', 'on')
+    return _SWAP_RB
+
+
 def encode_pixels(rgba, w, h, fmt) -> bytes:
     n = w * h
     if fmt in (0x10, 0x20):
@@ -585,8 +598,16 @@ def encode_image_to_tdxt(img, fmt=None, fit=None, stretch=False, hf3=None,
         raise ValueError('idx4 要求像素总数为偶数')
     rgba = img.tobytes()                      # Pillow RGBA = R,G,B,A
     if fmt in (0x10, 0x20):
-        payload = bytes(b for i in range(0, len(rgba), 4)
-                        for b in (rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]))
+        # 🔴 通道序：fmt=0x10 按 **RGBA** 原样写。
+        #    曾在这里做 R/B 交换（当 BGRA 处理），实机上新曲绘出现
+        #    「原本红色的部分变蓝」——正是 R/B 颠倒的典型表现。
+        #    底层 encode_pixels(0x10) 一直是原样返回，这里与它保持一致。
+        #    若某台机器上反而需要交换，把环境变量 UB_TEX_SWAP_RB=1 即可（见 _swap_rb）。
+        if _swap_rb():
+            payload = bytes(b for i in range(0, len(rgba), 4)
+                            for b in (rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]))
+        else:
+            payload = bytes(rgba)
     else:
         payload = encode_pixels(rgba, w, h, fmt)
     if hf3 is None:
@@ -729,7 +750,9 @@ def decode_tdxt(tdxt):
     if fmt == 0x0E:
         return Image.frombytes('RGB', (w, ht), bmp[:w * ht * 3], 'raw', 'BGR').convert('RGBA')
     if fmt == 0x10:
-        return Image.frombytes('RGBA', (w, ht), bmp[:w * ht * 4], 'raw', 'BGRA')
+        # 与 encode 保持一致：默认按 RGBA 解释（见 _swap_rb 的说明）
+        order = 'BGRA' if _swap_rb() else 'RGBA'
+        return Image.frombytes('RGBA', (w, ht), bmp[:w * ht * 4], 'raw', order)
     if fmt == 0x11:
         npx = w * ht // 2
         px = bytearray(bmp[:npx])

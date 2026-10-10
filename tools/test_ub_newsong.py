@@ -236,7 +236,7 @@ class TestBuildNewIfsSlots(unittest.TestCase):
         with mock.patch.object(UC, "parse_malody", return_value=charts), \
              mock.patch.object(
                  UC, "chart_to_eve",
-                 side_effect=lambda ch, hold_policy="split":
+                 side_effect=lambda ch, hold_policy="split", **kw:
                  (("EVE:" + ch.version).encode(), _Stats(len(ch.notes)))), \
              mock.patch.object(UC, "MiscIfs", _FakeIfs):
             det = N.build_new_ifs("src.ifs", "x.mc", diff, None, out, "split",
@@ -276,6 +276,45 @@ class TestBuildNewIfsSlots(unittest.TestCase):
         charts = [FakeChart("BSC", 200)]
         with self.assertRaises(ValueError):
             self._run(charts, {"ext": 5, "adv": 0, "bsc": 0}, self.tmp)
+
+
+
+
+class TestAudioOffsetAndTexChannel(unittest.TestCase):
+    """两个实机问题：① 音符比音乐晚 ② 曲绘红变蓝。"""
+
+    def test_chart_to_eve_swaps_disabled_by_default(self):
+        """fmt=0x10 应按 RGBA 原样写（曾误按 BGRA 交换 → 红变蓝）。"""
+        import tdxt_encode as T
+        from PIL import Image
+        if hasattr(T, '_SWAP_RB'):
+            T._SWAP_RB = None                      # 清缓存，读环境
+        img = Image.new('RGBA', (8, 8), (255, 0, 0, 255))
+        blob = T.encode_image_to_tdxt(img, fmt=0x10)
+        px = blob[T.HEADER_SIZE:T.HEADER_SIZE + 4]
+        self.assertEqual(px, b'\xff\x00\x00\xff',
+                         "红色像素应为 R,G,B,A = ff 00 00 ff，实际 %s" % px.hex(' '))
+
+    def test_roundtrip_keeps_color(self):
+        import tdxt_encode as T
+        from PIL import Image
+        img = Image.new('RGBA', (16, 8), (255, 0, 0, 255))
+        img.paste(Image.new('RGBA', (8, 8), (0, 0, 255, 255)), (8, 0))
+        back = T.decode_tdxt(T.encode_image_to_tdxt(img, fmt=0x10))
+        self.assertEqual(back.getpixel((2, 2))[:3], (255, 0, 0))
+        self.assertEqual(back.getpixel((12, 2))[:3], (0, 0, 255))
+
+
+class TestSlotMapOffset(unittest.TestCase):
+    """确保 eve 转换带上了 apply_bgm_offset（音符对齐音乐）。"""
+
+    def test_eve_of_passes_apply_bgm_offset(self):
+        import inspect
+        import ub_newsong as N
+        src = inspect.getsource(N.build_new_ifs)
+        self.assertIn("apply_bgm_offset=True", src,
+                      "build_new_ifs 必须传 apply_bgm_offset=True，"
+                      "否则 Malody 的音源偏移被忽略、音符会比音乐晚")
 
 
 if __name__ == "__main__":
