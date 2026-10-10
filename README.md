@@ -36,12 +36,32 @@
 
 - **Python 3.7 或 3.8**（32 位；见下方「Windows 7 注意事项」）
 - `Pillow`（贴图处理）
-- `ffmpeg`（音频解码；可选，不处理自带音源时不需要）
+- `kbinxml`（**必须 `==1.7`**）+ `lxml`（`==4.9.4`）—— 解析 Konami 的二进制 XML
+  （`_msc.ifs` 的 `imgfs` 清单）。⚠️ `kbinxml` 2.0+ 用了 PEP 604 的 `X | Y`
+  类型注解，**Python 3.7 连语法都不认**，所以必须钉在 1.7
+- **ffmpeg**（音源解码；见下方「ffmpeg 怎么放」）
 - 可选：`pyinstaller`（自行打包）
 
 ```bash
-pip install Pillow
+pip install Pillow "kbinxml==1.7" "lxml==4.9.4"
 ```
+
+### ffmpeg 怎么放
+
+安装谱面时要用 ffmpeg 把音源（ogg/mp3/…) 解码成 PCM。程序按以下顺序查找，
+**任选一种方式即可**——最省事的是**把 `ffmpeg.exe` 和主程序放在同一个目录**：
+
+1. 环境变量 `UB_FFMPEG` 指向完整路径
+2. **主程序同目录**（以及其下 `ffmpeg/`、`bin/`、`ffmpeg/bin/` 子目录）
+3. PyInstaller 解包目录
+4. `D:\ffmpeg\bin\` / `C:\ffmpeg\bin\`
+5. 系统 PATH
+
+> 之所以不把 ffmpeg 打进 exe：它编码压缩后仍占 **40 MB 以上**，
+> 会让 exe 从 23 MB 涨到 67 MB，**每次自更新都要重下整个包**。
+> 放在同目录则 exe 保持 23 MB，ffmpeg 只需下载一次、之后更新都不用动。
+
+用 `ub_store.exe --depcheck` 可以看到当前实际用的是哪个 ffmpeg。
 
 ---
 

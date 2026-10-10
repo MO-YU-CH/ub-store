@@ -350,12 +350,48 @@ def encode_oki4s_bruteforce(pcm: bytes, channels: int, num_samples: int) -> byte
 # 外部解码：任意音频 -> 48k/16bit/立体声 交错 PCM（走 ffmpeg）
 # ---------------------------------------------------------------------------
 def ffmpeg_exe() -> str:
-    cands = [os.environ.get(_FFMPEG_ENV), r"<FFMPEG>",
-             r"C:\ffmpeg\bin\ffmpeg.exe", shutil.which("ffmpeg")]
+    """定位 ffmpeg 可执行文件。
+
+    查找顺序（先找到先用）：
+      1. 环境变量 ``UB_FFMPEG`` 指定的完整路径（用户显式覆盖）
+      2. **PyInstaller 解包目录里的内置 ffmpeg**（``_MEIPASS/assets/ffmpeg.exe``）
+         —— 打包时带进去的那份，**优先于同目录**，免得被一个不兼容的
+            ffmpeg.exe 同目录副本抢占（实测新版 ffmpeg 在 Win7 上会
+            0xC0000005 崩溃，而内置的是能跑的 4.4.1）
+      3. **主程序所在目录**及其 ``assets/`` ``bin/`` ``ffmpeg/`` 等子目录
+      4. 常见安装位置 D:\\ffmpeg\\bin / C:\\ffmpeg\\bin
+      5. 系统 PATH
+    """
+    cands = []
+    env = os.environ.get(_FFMPEG_ENV)
+    if env:
+        cands.append(env)
+    subs = ("", "assets", "ffmpeg", "bin", os.path.join("ffmpeg", "bin"),
+            os.path.join("assets", "ffmpeg"))
+    # ① 内置的（_MEIPASS）优先
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        for sub in subs:
+            cands.append(os.path.join(meipass, sub, "ffmpeg.exe"))
+            cands.append(os.path.join(meipass, sub, "ffmpeg"))
+    # ② 主程序所在目录
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    for sub in subs:
+        cands.append(os.path.join(base, sub, "ffmpeg.exe"))
+        cands.append(os.path.join(base, sub, "ffmpeg"))
+    cands += [r"<FFMPEG>", r"C:\ffmpeg\bin\ffmpeg.exe"]
+    which = shutil.which("ffmpeg")
+    if which:
+        cands.append(which)
     for c in cands:
         if c and os.path.exists(c):
             return c
-    raise FileNotFoundError("找不到 ffmpeg；可用环境变量 %s 指定完整路径" % _FFMPEG_ENV)
+    raise FileNotFoundError(
+        "找不到 ffmpeg；可用环境变量 %s 指定完整路径，"
+        "或把 ffmpeg.exe 放到本程序同一目录下" % _FFMPEG_ENV)
 
 
 def ffprobe_exe() -> str:

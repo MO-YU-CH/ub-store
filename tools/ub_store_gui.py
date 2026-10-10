@@ -1765,6 +1765,12 @@ def main(argv=None):
             rows.append(("Pillow", "**缺失**: %s" % ex))
         for name, ver in rows:
             print("  %-12s %s" % (name, ver))
+        # ffmpeg 是外部可执行文件（音源解码用），单独报告路径
+        try:
+            import ub_audio as _ua
+            print("  %-12s %s" % ("ffmpeg", _ua.ffmpeg_exe()))
+        except Exception as ex:                              # noqa: BLE001
+            print("  %-12s **缺失**: %s" % ("ffmpeg", ex))
         print("=== 内部模块 ===")
         for mod, label in ((S, "ub_store"), (I, "ub_import"),
                            (UU, "ub_updater"), (U, "ub_update"),
