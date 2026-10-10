@@ -1397,6 +1397,61 @@ def list_downloaded() -> list:
     return [chart_card(d) for d in downloaded_dirs()]
 
 
+def delete_downloaded(folder: str, force: bool = False) -> dict:
+    """删除**本地下载目录**（清缓存，不碰游戏）。
+
+    与 `uninstall_music` 的区别：
+      * **卸载** = 从游戏里移除（回滚曲表/包表/文件）
+      * **删除** = 只清掉 `<数据目录>/cache/<cid>/` 这份下载产物
+
+    🔴 安全约束（防止误删）：
+      1. 目标必须是**真实存在的目录**
+      2. 必须位于 `cache_dir()` **之下**（用 realpath 比较，防 `..` 穿越）
+      3. **不能是 `cache_dir()` 本身**，也不能是它的父级
+    已装进游戏的谱面默认**拒绝**删除（`force=True` 才允许，且返回提示，
+    因为游戏里还会留着那条曲子）。
+
+    返回 {folder, freed, installed_music_id, warns}
+    """
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        raise StoreError(-1, "目录不存在：%s" % folder)
+
+    root = os.path.realpath(cache_dir())
+    target = os.path.realpath(folder)
+    if target == root:
+        raise StoreError(-1, "拒绝删除缓存根目录本身")
+    if os.path.commonpath([root, target]) != root:
+        raise StoreError(-1, "拒绝删除缓存目录之外的路径：%s" % folder)
+    if target.startswith(root + os.sep) is False and target != root:
+        raise StoreError(-1, "目标不在缓存目录内：%s" % folder)
+
+    # 该目录是否已装进游戏？已装则先要求卸载（避免游戏里留孤儿条目）
+    card = chart_card(folder)
+    mid = card.get("installed_music_id")
+    if mid and not force:
+        raise StoreError(-1, (
+            "《%s》已经装进游戏（music_id=%s）。\n"
+            "请先【卸载】再删除，否则游戏里会留下一条无效曲目。"
+            % (card.get("title") or os.path.basename(folder), mid)))
+
+    # 统计大小
+    freed = 0
+    for dirpath, _dirnames, filenames in os.walk(folder):
+        for f in filenames:
+            try:
+                freed += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+
+    shutil.rmtree(folder)
+    warns = []
+    if mid:
+        warns.append("游戏里仍保留 music_id=%s 的条目（本次是强制删除）" % mid)
+    return {"folder": folder, "freed": freed,
+            "installed_music_id": mid, "warns": warns}
+
+
 def default_reading(title: str) -> str:
     """曲表 `name_string` 的默认值 = **跟着真实曲名**（用户要求：得看得出自己玩的是什么）。
 

@@ -858,7 +858,11 @@ class StoreGUI:
         self.btn_batch_uninstall = ttk.Button(
             bar, text="批量卸载(0)", command=self.batch_uninstall_downloaded)
         self.btn_batch_uninstall.pack(side="left", padx=4)
-        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮）",
+        self.btn_batch_delete = ttk.Button(
+            bar, text="批量删除(0)", command=self.batch_delete_downloaded)
+        self.btn_batch_delete.pack(side="left", padx=4)
+        ttk.Label(bar, text="（勾选卡片左上角方框后点按钮；"
+                            "【卸载】=从游戏移除，【删除】=只清本地文件）",
                   style="Dim.TLabel").pack(side="left", padx=8)
 
         self.downloaded_grid = CardGrid(
@@ -877,11 +881,90 @@ class StoreGUI:
         except Exception:                                    # noqa: BLE001
             n = 0
         for btn, label in ((self.btn_batch_install, "批量安装"),
-                           (self.btn_batch_uninstall, "批量卸载")):
+                           (self.btn_batch_uninstall, "批量卸载"),
+                           (getattr(self, "btn_batch_delete", None), "批量删除")):
+            if btn is None:
+                continue
             try:
                 btn.configure(text="%s(%d)" % (label, n))
             except Exception:                                # noqa: BLE001
                 pass
+
+    # ---- 批量删除（只清本地下载文件）----
+    def batch_delete_downloaded(self):
+        items = self.downloaded_grid.checked_items()
+        if not items:
+            messagebox.showinfo("提示", "请先勾选要删除的谱面（卡片左上角方框）。")
+            return
+        todo, blocked = [], []
+        for it in items:
+            name = it.get("title") or os.path.basename(it.get("dir") or "?")
+            if not it.get("dir"):
+                continue
+            if it.get("installed_music_id"):
+                blocked.append((name, it.get("installed_music_id")))
+            else:
+                todo.append((name, it.get("dir")))
+        if blocked:
+            names = "、".join("%s(id=%s)" % (n, m) for n, m in blocked[:6])
+            if not messagebox.askyesno(
+                    "有已装进游戏的谱面",
+                    "勾选的里面有 %d 个已经装进游戏：\n  %s\n\n"
+                    "删除本地文件后，游戏里会留下无效曲目。\n\n"
+                    "建议先取消除勾选并【卸载】它们。\n"
+                    "仍要连同这些一起删除本地文件吗？" % (len(blocked), names)):
+                return
+            todo += blocked
+        if not todo:
+            messagebox.showinfo("提示", "没有可删除的条目。")
+            return
+        if not messagebox.askyesno(
+                "批量删除本地文件",
+                "将删除 %d 个谱面的下载文件（只清本地缓存）：\n  %s\n\n确定？"
+                % (len(todo), "、".join(n for n, _ in todo[:6])
+                   + ("…" if len(todo) > 6 else ""))):
+            return
+        self.set_status("开始批量删除 %d 个…" % len(todo))
+        self.progress.configure(value=0, maximum=len(todo))
+
+        def work():
+            ok, fail, total = [], [], 0
+            for i, (name, folder) in enumerate(todo, 1):
+                self.async_.q.put((self.set_status,
+                                   ("批量删除 %d/%d：%s" % (i, len(todo), name),), {}))
+                self.async_.q.put((self.progress.configure, (), {"value": i - 1}))
+                try:
+                    res = S.delete_downloaded(folder, force=True)
+                    total += res.get("freed", 0)
+                    ok.append(name)
+                except Exception as ex:                      # noqa: BLE001
+                    fail.append((name, str(ex)))
+            return {"ok": ok, "fail": fail, "freed": total}
+
+        def done(res):
+            self.progress.configure(value=len(todo))
+            ok, fail = res["ok"], res["fail"]
+            mb = res.get("freed", 0) / 1048576.0
+            self.set_status("批量删除完成：成功 %d，失败 %d，释放 %.1f MB"
+                            % (len(ok), len(fail), mb))
+            lines = []
+            if ok:
+                lines.append("已删除 %d 个，释放 %.1f MB：" % (len(ok), mb))
+                for n in ok[:12]:
+                    lines.append("   · %s" % n)
+                if len(ok) > 12:
+                    lines.append("   … 还有 %d 个" % (len(ok) - 12))
+            if fail:
+                lines.append("")
+                lines.append("失败 %d 个：" % len(fail))
+                for n, e in fail[:10]:
+                    lines.append("   · %s：%s" % (n, str(e)[:80]))
+            messagebox.showinfo("批量删除完成", "\n".join(lines))
+            self.reload_downloaded()
+
+        self.async_.run(work, done,
+                        lambda e: (messagebox.showerror("批量删除失败", str(e)),
+                                   self.set_status("批量删除失败：%s" % e)))
 
     # ---- 批量安装（已下载 -> 游戏）----
     def batch_install_downloaded(self):
@@ -1569,16 +1652,60 @@ class StoreGUI:
                      justify="left", anchor="w").pack(fill="x")
             return
         if mid:
-            row = tk.Frame(parent, bg=C["bg2"])
-            row.pack(fill="x")
-            tk.Label(row, text="已装 id=%s" % mid, bg=C["bg2"], fg=C["accent2"],
-                     font=(UI_FONT, 8)).pack(side="left")
+            tk.Label(parent, text="已装 id=%s" % mid, bg=C["bg2"], fg=C["accent2"],
+                     font=(UI_FONT, 8)).pack(anchor="w")
+        # 一行两个按钮：【一键安装】/【卸载】 + 【删除本地】
+        row = tk.Frame(parent, bg=C["bg2"])
+        row.pack(fill="x")
+        if mid:
             ttk.Button(row, text="卸载", style="Danger.TButton",
-                       command=lambda m=mid: self.uninstall_card(m)).pack(side="right")
+                       command=lambda m=mid: self.uninstall_card(m)).pack(
+                side="left", fill="x", expand=True)
         else:
-            ttk.Button(parent, text="一键安装", style="Accent.TButton",
+            ttk.Button(row, text="一键安装", style="Accent.TButton",
                        command=lambda it=item: self.one_click_install_card(
-                           it)).pack(fill="x")
+                           it)).pack(side="left", fill="x", expand=True)
+        # 【删除】= 只清本地下载文件（不同于"卸载"= 从游戏移除）
+        ttk.Button(row, text="删除", style="Danger.TButton",
+                   command=lambda it=item: self.delete_card(it)).pack(
+            side="left", fill="x", expand=True, padx=(4, 0))
+
+    def delete_card(self, item):
+        """删除本地下载的谱面文件（不动游戏）。"""
+        folder = item.get("dir")
+        if not folder:
+            messagebox.showinfo("提示", "该卡片缺少下载目录信息。")
+            return
+        title = item.get("title") or os.path.basename(folder)
+        mid = item.get("installed_music_id")
+        if mid:
+            messagebox.showwarning(
+                "已装进游戏",
+                "《%s》已经装进游戏（music_id=%s）。\n\n"
+                "建议先到【已装自制谱】页【卸载】，再删除本地文件，\n"
+                "否则游戏里会留下一条无效曲目。" % (title, mid))
+            return
+        if not messagebox.askyesno(
+                "删除本地谱面",
+                "将从磁盘删除《%s》的下载文件：\n\n  %s\n\n"
+                "（只删本地缓存，不影响游戏里已装的曲子）\n\n确定删除？"
+                % (title, folder)):
+            return
+
+        def work():
+            return S.delete_downloaded(folder)
+
+        def done(res):
+            mb = res.get("freed", 0) / 1048576.0
+            self.set_status("已删除《%s》，释放 %.1f MB" % (title, mb))
+            self.reload_downloaded()
+
+        def err(e):
+            messagebox.showerror("删除失败", str(e))
+            self.set_status("删除失败：%s" % e)
+
+        self.set_status("正在删除《%s》…" % title)
+        self.async_.run(work, done, err)
 
     # ---- 本地导入：谱面 / 官方更新包 ----
     def _data_dir(self):

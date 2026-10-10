@@ -935,5 +935,96 @@ class TestEdgeCases(BaseCase):
         self.assertIsNone(S.load_credentials())
 
 
+class TestDeleteDownloaded(BaseCase):
+    """本地下载文件的删除（delete_downloaded）——重点是安全约束。"""
+
+    def setUp(self):
+        super().setUp()
+        cfg = S.default_config()
+        cfg["cache_dir"] = S.CACHE_DIR          # cache_dir() 读的是 config
+        S.save_config(cfg)
+        os.makedirs(S.CACHE_DIR, exist_ok=True)
+
+    def _make_dl(self, name="12345", size=1000):
+        d = os.path.join(S.CACHE_DIR, name)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "chart.mc"), "wb") as f:
+            f.write(b"m" * size)
+        with open(os.path.join(d, "cover.jpg"), "wb") as f:
+            f.write(b"c" * 100)
+        return d
+
+    def _mark_installed(self, title, music_id):
+        """写 installed.json。注意 chart_card 是**按标题**匹配已装记录的。"""
+        with open(S.MANIFEST_PATH, "w", encoding="utf-8") as f:
+            json.dump({"items": [{"title": title, "music_id": music_id}]},
+                      f, ensure_ascii=False)
+
+    # ---- 正常删除 ----
+    def test_delete_normal(self):
+        d = self._make_dl()
+        r = S.delete_downloaded(d)
+        self.assertEqual(r["freed"], 1100)
+        self.assertFalse(os.path.exists(d))
+        self.assertIsNone(r["installed_music_id"])
+
+    def test_delete_then_list_downloaded_empty(self):
+        d = self._make_dl()
+        self.assertEqual(len(S.downloaded_dirs()), 1)
+        S.delete_downloaded(d)
+        self.assertEqual(S.downloaded_dirs(), [])
+
+    # ---- 🔴 安全约束 ----
+    def test_refuse_cache_root_itself(self):
+        """绝不能把整个缓存目录端掉。"""
+        self._make_dl()
+        with self.assertRaises(S.StoreError):
+            S.delete_downloaded(S.CACHE_DIR)
+        self.assertTrue(os.path.isdir(S.CACHE_DIR))
+
+    def test_refuse_outside_cache(self):
+        """缓存目录之外的路径一律拒绝（防止误删任意目录）。"""
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        with self.assertRaises(S.StoreError):
+            S.delete_downloaded(outside)
+        self.assertTrue(os.path.isdir(outside))
+
+    def test_refuse_dotdot_traversal(self):
+        """`cache/../outside` 这种穿越也要拦住。"""
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        with self.assertRaises(S.StoreError):
+            S.delete_downloaded(os.path.join(S.CACHE_DIR, "..", "outside"))
+        self.assertTrue(os.path.isdir(outside))
+
+    def test_refuse_nonexistent(self):
+        with self.assertRaises(S.StoreError):
+            S.delete_downloaded(os.path.join(S.CACHE_DIR, "nope"))
+
+    def test_refuse_data_dir(self):
+        """连数据目录本身也不能删（它是 cache 的父级）。"""
+        with self.assertRaises(S.StoreError):
+            S.delete_downloaded(S.DATA_DIR)
+        self.assertTrue(os.path.isdir(S.DATA_DIR))
+
+    # ---- 已装进游戏的：默认拒绝 ----
+    def test_refuse_when_installed(self):
+        d = self._make_dl(name="SongA")
+        self._mark_installed("SongA", 90009000)
+        with self.assertRaises(S.StoreError) as cm:
+            S.delete_downloaded(d)
+        self.assertIn("卸载", str(cm.exception))
+        self.assertTrue(os.path.isdir(d), "拒绝时不应删除任何东西")
+
+    def test_force_when_installed(self):
+        d = self._make_dl(name="SongB")
+        self._mark_installed("SongB", 90009000)
+        r = S.delete_downloaded(d, force=True)
+        self.assertFalse(os.path.exists(d))
+        self.assertEqual(r["installed_music_id"], 90009000)
+        self.assertTrue(r["warns"], "强制删除时应给出警告")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
