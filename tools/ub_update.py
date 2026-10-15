@@ -27,7 +27,7 @@ import urllib.request
 # ---------------------------------------------------------------------------
 # 版本与更新源
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.19.0"
 GITHUB_REPO = "MO-YU-CH/ub-store"
 
 #: 各平台从 Release 资产里挑哪个文件。key 由 pick_asset_key() 决定。
@@ -221,6 +221,17 @@ def download(url, dest, proxy=None, timeout=60, progress=None):
                 done += len(chunk)
                 if progress:
                     progress(done, total)
+    # ★ 长度校验：Content-Length 存在时，实收字节数必须一致。
+    #   否则传输被中途截断（实测出现过"正好 40 MiB"这种整数截断）也会被当成下载成功，
+    #   进而把半截文件替换成主程序 —— 表现为 exe 启动报
+    #   "Cannot open PyInstaller archive"（2026-10-16 实机踩过这个坑）。
+    if total and done != total:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise UpdateError("下载不完整：收到 %d / 应为 %d 字节，已丢弃半截文件"
+                          % (done, total))
     os.replace(tmp, dest)
     return dest
 
@@ -247,6 +258,31 @@ def cleanup_old(exe=None):
     return False
 
 
+#: PyInstaller 单文件 exe 末尾 CArchive cookie 的魔数
+#: （cookie 定长 88 字节、位于文件**最末尾**；被截断的包必然缺这个尾巴）
+PYI_MAGIC = b"MEI\x0c\x0b\x0a\x0b\x0e"
+PYI_COOKIE_SIZE = 88
+
+
+def verify_pyinstaller_exe(path):
+    """确认 path 是一个**完整**的 PyInstaller 单文件 exe，是就返回 True。
+
+    判据：文件末尾 88 字节以 `MEI\\x0c\\x0b\\x0a\\x0b\\x0e` 开头。
+    下载被截断时这个尾巴必然缺失 —— 正好挡住"半截 exe 被当成新版本覆盖主程序"
+    （2026-10-16 实机砖掉就是这么来的）。
+    """
+    size = os.path.getsize(path)
+    if size < PYI_COOKIE_SIZE:
+        raise UpdateError("新文件太小（%d 字节），不可能是完整的 exe：%s" % (size, path))
+    with open(path, "rb") as f:
+        f.seek(-PYI_COOKIE_SIZE, os.SEEK_END)
+        tail = f.read(PYI_COOKIE_SIZE)
+    if not tail.startswith(PYI_MAGIC):
+        raise UpdateError("新文件末尾没有 PyInstaller 归档标记（疑似下载截断/损坏）：%s"
+                          % path)
+    return True
+
+
 def replace_self(new_exe, restart=True, exe=None):
     """把 new_exe 覆盖到当前 exe 并（可选）重启。
 
@@ -261,6 +297,7 @@ def replace_self(new_exe, restart=True, exe=None):
         raise UpdateError("当前不是打包后的 exe，无法自更新（源码模式请手动更新）")
     if not os.path.exists(new_exe):
         raise UpdateError("新文件不存在：%s" % new_exe)
+    verify_pyinstaller_exe(new_exe)        # ★ 覆盖主程序前的最后一道闸
     old = exe + OLD_SUFFIX
     try:
         if os.path.exists(old):

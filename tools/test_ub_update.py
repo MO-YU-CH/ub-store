@@ -164,6 +164,12 @@ class TestCheck(unittest.TestCase):
 
 
 class TestReplaceSelf(unittest.TestCase):
+    #: 一个"最小合法"的 PyInstaller 单文件 exe 假体：开头 MZ + 末尾 88 字节 CArchive
+    #: cookie（以 PYI_MAGIC 开头）。replace_self() 现在会校验这个尾巴
+    #: （见 verify_pyinstaller_exe），所以夹具不能再拿 3 字节的 b"NEW" 糊弄。
+    NEW_EXE = (b"MZ" + b"P" * 30
+               + U.PYI_MAGIC + b"\0" * (U.PYI_COOKIE_SIZE - len(U.PYI_MAGIC)))
+
     def setUp(self):
         import tempfile
         self.d = tempfile.mkdtemp(prefix="ubupd_")
@@ -172,7 +178,7 @@ class TestReplaceSelf(unittest.TestCase):
         with open(self.exe, "wb") as f:
             f.write(b"OLD")
         with open(self.new, "wb") as f:
-            f.write(b"NEW")
+            f.write(self.NEW_EXE)
 
     def tearDown(self):
         import shutil
@@ -181,8 +187,19 @@ class TestReplaceSelf(unittest.TestCase):
     def test_replace_no_restart(self):
         U.replace_self(self.new, restart=False, exe=self.exe)
         with open(self.exe, "rb") as f:
-            self.assertEqual(f.read(), b"NEW")
+            self.assertEqual(f.read(), self.NEW_EXE)
         self.assertTrue(os.path.exists(self.exe + U.OLD_SUFFIX))
+
+    def test_rejects_truncated_new_exe(self):
+        # 下载被截断（缺末尾 cookie）时必须拒绝，且**原 exe 一个字都不能动**
+        trunc = os.path.join(self.d, "app.trunc.exe")
+        with open(trunc, "wb") as f:
+            f.write(self.NEW_EXE[:30])                      # 砍掉整条尾巴
+        with self.assertRaises(U.UpdateError):
+            U.replace_self(trunc, restart=False, exe=self.exe)
+        with open(self.exe, "rb") as f:
+            self.assertEqual(f.read(), b"OLD")              # 内容没变
+        self.assertFalse(os.path.exists(self.exe + U.OLD_SUFFIX))   # 也没留 .old
 
     def test_cleanup_old(self):
         U.replace_self(self.new, restart=False, exe=self.exe)
@@ -238,6 +255,39 @@ class TestDownload(unittest.TestCase):
             U.download("https://e/x.bin", dest)
         with open(dest, "rb") as f:
             self.assertEqual(f.read(), b"HELLO")
+        self.assertFalse(os.path.exists(dest + ".part"))
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+    def test_download_rejects_short_body(self):
+        # 服务端谎报 Content-Length（实际少发）时必须报错，且**不留半截文件**。
+        # 2026-10-16 实机砖掉就是这个原因：下载被截断在正好 40 MiB，
+        # 旧代码却当成下载成功，把半截 exe 替换成了主程序
+        # （启动报 "Cannot open PyInstaller archive"）。
+        import tempfile
+        d = tempfile.mkdtemp(prefix="ubdl_")
+        dest = os.path.join(d, "x.bin")
+
+        class ShortResp:
+            headers = {"Content-Length": "5"}
+
+            def read(self, n=-1):
+                if getattr(self, "_done", False):
+                    return b""
+                self._done = True
+                return b"HEL"                              # 只给 3 字节
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(U, "_opener") as m:
+            m.return_value.open.return_value = ShortResp()
+            with self.assertRaises(U.UpdateError):
+                U.download("https://e/x.bin", dest)
+        self.assertFalse(os.path.exists(dest))
         self.assertFalse(os.path.exists(dest + ".part"))
         import shutil
         shutil.rmtree(d, ignore_errors=True)

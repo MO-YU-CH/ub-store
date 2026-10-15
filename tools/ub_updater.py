@@ -65,8 +65,34 @@ def song_ids_of(rel: str) -> list:
 
 
 # ---------------------------------------------------------------- 读包
+def _common_top(names):
+    """若所有条目都位于同一个顶层目录下，返回该目录名，否则 None。"""
+    firsts = set()
+    for n in names:
+        p = n.replace('\\', '/').split('/')
+        if len(p) > 1:
+            firsts.add(p[0])
+    return firsts.pop() if len(firsts) == 1 else None
+
+
+def _pack_entries(infos):
+    """[(原始名, 大小)] → [(剥掉统一顶层目录后的相对路径, 大小)]，按路径排序。"""
+    top = _common_top([n for n, _ in infos])
+    out = []
+    for name, size in infos:
+        rel = name.replace('\\', '/')
+        if top and rel.startswith(top + '/'):
+            rel = rel[len(top) + 1:]
+        out.append((rel, size))
+    return sorted(out)
+
+
 def read_pack(pack_path: str):
-    """返回 [(相对路径(包内去掉顶层目录), 大小)]"""
+    """返回 [(相对路径(包内去掉顶层目录), 大小)]
+
+    支持三种形式：`.7z`（py7zr）、`.zip`（标准库 zipfile，无需额外依赖）、
+    以及**已解开的目录**。
+    """
     if os.path.isdir(pack_path):
         entries = []
         for dp, _dn, fns in os.walk(pack_path):
@@ -80,26 +106,44 @@ def read_pack(pack_path: str):
                 entries.append((rel, os.path.getsize(full)))
         return sorted(entries)
 
+    ext = os.path.splitext(pack_path)[1].lower()
+    if ext == ".zip":
+        import zipfile
+        with zipfile.ZipFile(pack_path) as z:
+            infos = [i for i in z.infolist() if not i.is_dir()]
+        return _pack_entries([(i.filename, i.file_size) for i in infos])
+    if ext != ".7z":
+        raise ValueError("不支持的更新包格式（只认 .7z / .zip / 目录）：%s" % pack_path)
+
     import py7zr
     with py7zr.SevenZipFile(pack_path, 'r') as z:
         infos = [i for i in z.list() if not i.is_directory]
-    top = None
-    parts = [i.filename.replace('\\', '/').split('/') for i in infos]
-    if parts:
-        firsts = set(p[0] for p in parts if len(p) > 1)
-        if len(firsts) == 1:
-            top = firsts.pop()
-    out = []
-    for i in infos:
-        rel = i.filename.replace('\\', '/')
-        if top and rel.startswith(top + '/'):
-            rel = rel[len(top) + 1:]
-        out.append((rel, i.uncompressed or 0))
-    return sorted(out)
+    return _pack_entries([(i.filename, i.uncompressed or 0) for i in infos])
+
+
+def _extract_into(pack_path, target):
+    """把包解到 target。
+
+    `.zip` 用**标准库 zipfile**（不需要任何第三方依赖，随 exe 一起内置）；
+    `.7z` 用 py7zr（需要打在包里）。
+    """
+    ext = os.path.splitext(pack_path)[1].lower()
+    if ext == ".zip":
+        import zipfile
+        with zipfile.ZipFile(pack_path) as z:
+            z.extractall(path=target)
+        return
+    if ext != ".7z":
+        raise ValueError("不支持的更新包格式（只认 .7z / .zip / 目录）：%s" % pack_path)
+    import py7zr
+    with py7zr.SevenZipFile(pack_path, 'r') as z:
+        z.extractall(path=target)
 
 
 def extract_pack(pack_path: str, workdir: str):
     """解压到 workdir/<包名>/ ，返回解压后的顶层目录。
+
+    支持 `.7z` / `.zip` / 已解开的目录。
        ★ 每个包独立目录（曾因复用同一目录导致后续包挑到上一个包的解压结果）
        ★ 目录形式的包常为「<包名>/<包名>/data/...」双层嵌套，必须下钻一层，
          否则 src+rel 路径错位 → 复制 0 个文件（read_pack 已按剥层后的相对路径返回）"""
@@ -107,7 +151,6 @@ def extract_pack(pack_path: str, workdir: str):
     if os.path.isdir(pack_path):
         sub = os.path.join(pack_path, os.path.basename(pack_path.rstrip('\\/')))
         return sub if os.path.isdir(sub) else pack_path
-    import py7zr
     stem = os.path.splitext(os.path.basename(pack_path))[0]
     target = os.path.join(workdir, stem)
     marker = os.path.join(target, '.extract_ok')
@@ -115,8 +158,7 @@ def extract_pack(pack_path: str, workdir: str):
         if os.path.isdir(target):
             shutil.rmtree(target, ignore_errors=True)
         os.makedirs(target, exist_ok=True)
-        with py7zr.SevenZipFile(pack_path, 'r') as z:
-            z.extractall(path=target)
+        _extract_into(pack_path, target)
         with open(marker, 'w') as f:
             f.write('ok')
     subs = [d for d in os.listdir(target) if os.path.isdir(os.path.join(target, d))]

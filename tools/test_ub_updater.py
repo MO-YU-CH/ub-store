@@ -92,5 +92,63 @@ class TestNewDllHandling(unittest.TestCase):
         self.assertIn("new_dlls", src)
 
 
+class TestZipPackSupport(unittest.TestCase):
+    """`.zip` 形式的更新包必须和 `.7z` 一样能用。
+
+    背景：GUI 的文件选择框一直写着 "*.7z *.zip"、ub_import.PACK_EXTS 也含 ".zip"，
+    但 read_pack / extract_pack 过去只实现了 7z 分支 ⇒ 用户选 zip 会直接报错。
+    zip 走标准库 zipfile，不需要任何第三方依赖（会随 exe 一起内置）。
+    """
+
+    TOP = "L44JF_2from1"
+
+    def _make_zip(self, path):
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("%s/data/music_info/music_info.xml" % self.TOP, "<x/>")
+            z.writestr("%s/modules/jubeat.dll" % self.TOP, b"MZ" + b"\x00" * 100)
+            z.writestr("%s/data/d3/model/tex_l44_bnr_big_id11009229.bin" % self.TOP,
+                       b"\x01" * 7)
+        return path
+
+    def test_read_pack_zip_strips_top(self):
+        tmp = tempfile.mkdtemp(prefix="ub_zip1_")
+        try:
+            z = self._make_zip(os.path.join(tmp, "pack.zip"))
+            rels = dict(UU.read_pack(z))
+            self.assertIn("data/music_info/music_info.xml", rels)
+            self.assertIn("modules/jubeat.dll", rels)
+            self.assertEqual(rels["modules/jubeat.dll"], 102)
+            for r in rels:
+                self.assertFalse(r.startswith(self.TOP + "/"),
+                                 "顶层目录没剥掉: %s" % r)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_extract_pack_zip(self):
+        tmp = tempfile.mkdtemp(prefix="ub_zip2_")
+        try:
+            z = self._make_zip(os.path.join(tmp, "pack.zip"))
+            root = UU.extract_pack(z, os.path.join(tmp, "work"))
+            self.assertTrue(os.path.isfile(
+                os.path.join(root, "data/music_info/music_info.xml")))
+            self.assertTrue(os.path.isfile(os.path.join(root, "modules/jubeat.dll")))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_unsupported_ext_raises(self):
+        """既不是 .7z 也不是 .zip（也不是目录）时必须明确报错，而不是静默失败。"""
+        tmp = tempfile.mkdtemp(prefix="ub_zip3_")
+        try:
+            bad = os.path.join(tmp, "pack.rar")
+            with open(bad, "wb") as f:
+                f.write(b"Rar!\x1a\x07\x00")
+            with self.assertRaises(ValueError):
+                UU.read_pack(bad)
+            with self.assertRaises(ValueError):
+                UU.extract_pack(bad, os.path.join(tmp, "work"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
